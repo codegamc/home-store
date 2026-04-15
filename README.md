@@ -32,28 +32,28 @@ Here is the status and coverage of core object storage APIs...
 | Library | Package | Tested |
 |---------|---------|--------|
 | Go AWS SDK v2 | `github.com/aws/aws-sdk-go-v2/service/s3` | ✅ |
-| Python boto3 | `boto3` | ❌ |
+| Python boto3 | `boto3` | ✅ |
 
 #### Bucket Operations
 
 | API Operation | Status | Go AWS SDK v2 | Python boto3 |
 |---------------|--------|---------------|--------------|
-| ListBuckets | Done | ✅ | ❌ |
-| CreateBucket | Done | ✅ | ❌ |
-| DeleteBucket | Done | ✅ | ❌ |
-| HeadBucket | Done | ✅ | ❌ |
+| ListBuckets | Done | ✅ | ✅ |
+| CreateBucket | Done | ✅ | ✅ |
+| DeleteBucket | Done | ✅ | ✅ |
+| HeadBucket | Done | ✅ | ✅ |
 | GetBucketLocation | Planned | ❌ | ❌ |
 
 #### Object Operations
 
 | Operation | Status | Go AWS SDK v2 | Python boto3 |
 |-----------|--------|---------------|--------------|
-| PutObject | Done | ✅ | ❌ |
-| GetObject | Done | ✅ | ❌ |
-| DeleteObject | Done | ✅ | ❌ |
+| PutObject | Done | ✅ | ✅ |
+| GetObject | Done | ✅ | ✅ |
+| DeleteObject | Done | ✅ | ✅ |
 | DeleteObjects | Planned | ❌ | ❌ |
-| HeadObject | Done | ✅ | ❌ |
-| CopyObject | Done | ✅ | ❌ |
+| HeadObject | Done | ✅ | ✅ |
+| CopyObject | Done | ✅ | ✅ |
 | ListObjects | Planned | ❌ | ❌ |
 | ListObjectsV2 | Planned | ❌ | ❌ |
 | GetObjectAttributes | Planned | ❌ | ❌ |

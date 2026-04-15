@@ -1,0 +1,8 @@
+[project]
+name = "home-store-integration"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "boto3>=1.35.0",
+    "pytest>=8.0.0",
+]

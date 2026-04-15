@@ -3,3 +3,4 @@ bin/
 
 # Workspace
 .vscode/
+test/integration/python/__pycache__/*.pyc
