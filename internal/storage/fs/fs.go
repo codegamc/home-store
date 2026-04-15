@@ -13,7 +13,8 @@ import (
 
 // FSBackend is a filesystem-backed implementation of storage.Backend.
 type FSBackend struct {
-	basePath string
+	basePath  string
+	metaStore *FSMetadataStore
 }
 
 // bucketMetadata stores bucket metadata on disk.
@@ -38,8 +39,13 @@ func NewBackend(basePath string) (*FSBackend, error) {
 	if err := os.MkdirAll(basePath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create base path: %w", err)
 	}
+	metaStore, err := NewFSMetadataStore(basePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create metadata store: %w", err)
+	}
 	return &FSBackend{
-		basePath: basePath,
+		basePath:  basePath,
+		metaStore: metaStore,
 	}, nil
 }
 

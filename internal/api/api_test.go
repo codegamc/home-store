@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/xml"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,20 +17,26 @@ var _ storage.Backend = (*mockBackend)(nil)
 
 type mockBackend struct{}
 
-func (m *mockBackend) CreateBucket(ctx context.Context, name string) error {
-	return nil
+func (m *mockBackend) CreateBucket(ctx context.Context, name string) error { return nil }
+func (m *mockBackend) DeleteBucket(ctx context.Context, name string) error { return nil }
+func (m *mockBackend) BucketExists(ctx context.Context, name string) (bool, error) {
+	return false, nil
 }
-
-func (m *mockBackend) DeleteBucket(ctx context.Context, name string) error {
-	return nil
-}
-
 func (m *mockBackend) ListBuckets(ctx context.Context) ([]storage.BucketInfo, error) {
 	return nil, nil
 }
-
-func (m *mockBackend) BucketExists(ctx context.Context, name string) (bool, error) {
-	return false, nil
+func (m *mockBackend) PutObject(ctx context.Context, bucket, key string, body io.Reader, meta storage.ObjectMeta) error {
+	return nil
+}
+func (m *mockBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, storage.ObjectMeta, error) {
+	return nil, storage.ObjectMeta{}, storage.ErrObjectNotFound
+}
+func (m *mockBackend) DeleteObject(ctx context.Context, bucket, key string) error { return nil }
+func (m *mockBackend) HeadObject(ctx context.Context, bucket, key string) (storage.ObjectMeta, error) {
+	return storage.ObjectMeta{}, storage.ErrObjectNotFound
+}
+func (m *mockBackend) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) (storage.ObjectMeta, error) {
+	return storage.ObjectMeta{}, nil
 }
 
 func TestNewHandler(t *testing.T) {
@@ -72,6 +79,21 @@ func (m *mockBackendWithBuckets) ListBuckets(ctx context.Context) ([]storage.Buc
 func (m *mockBackendWithBuckets) BucketExists(ctx context.Context, name string) (bool, error) {
 	_, exists := m.buckets[name]
 	return exists, nil
+}
+func (m *mockBackendWithBuckets) PutObject(ctx context.Context, bucket, key string, body io.Reader, meta storage.ObjectMeta) error {
+	return nil
+}
+func (m *mockBackendWithBuckets) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, storage.ObjectMeta, error) {
+	return nil, storage.ObjectMeta{}, storage.ErrObjectNotFound
+}
+func (m *mockBackendWithBuckets) DeleteObject(ctx context.Context, bucket, key string) error {
+	return nil
+}
+func (m *mockBackendWithBuckets) HeadObject(ctx context.Context, bucket, key string) (storage.ObjectMeta, error) {
+	return storage.ObjectMeta{}, storage.ErrObjectNotFound
+}
+func (m *mockBackendWithBuckets) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) (storage.ObjectMeta, error) {
+	return storage.ObjectMeta{}, nil
 }
 
 func TestListBuckets(t *testing.T) {

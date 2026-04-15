@@ -44,6 +44,13 @@ type Object struct {
 	StorageClass string `xml:"StorageClass"`
 }
 
+// CopyObjectResult is the response to CopyObject.
+type CopyObjectResult struct {
+	XMLName      xml.Name `xml:"CopyObjectResult"`
+	ETag         string   `xml:"ETag"`
+	LastModified string   `xml:"LastModified"`
+}
+
 // ErrorResponse is an S3 error response.
 type ErrorResponse struct {
 	XMLName   xml.Name `xml:"Error"`

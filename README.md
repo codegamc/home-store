@@ -35,6 +35,17 @@ Here is the status and coverage of core object storage APIs...
 | DeleteBucket | In Progress | |
 | HeadBucket | In Progress | |
 
+#### Object Operations
+
+| Operation | Status |
+|-----------|--------|
+| PutObject | Done |
+| GetObject | Done |
+| DeleteObject | Done |
+| HeadObject | Done |
+| CopyObject | Done |
+| ListObjectsV2 | Planned |
+
 #### Other Operations
 
 TODO

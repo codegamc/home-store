@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"time"
 )
@@ -14,6 +15,13 @@ type Backend interface {
 	DeleteBucket(ctx context.Context, name string) error
 	ListBuckets(ctx context.Context) ([]BucketInfo, error)
 	BucketExists(ctx context.Context, name string) (bool, error)
+
+	// Object operations
+	PutObject(ctx context.Context, bucket, key string, body io.Reader, meta ObjectMeta) error
+	GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, ObjectMeta, error)
+	DeleteObject(ctx context.Context, bucket, key string) error
+	HeadObject(ctx context.Context, bucket, key string) (ObjectMeta, error)
+	CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) (ObjectMeta, error)
 }
 
 // BucketInfo contains metadata about a bucket.

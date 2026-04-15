@@ -4,6 +4,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/codegamc/home-store/internal/storage"
@@ -39,6 +40,13 @@ func (h *Handler) setupRoutes() {
 	h.mux.HandleFunc("/", h.routeRequest)
 }
 
+// parseBucketKey splits a request path into bucket and object key.
+// Path must have the form /{bucket}/{key...}.
+func parseBucketKey(path string) (bucket, key string) {
+	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
+	return parts[0], parts[1]
+}
+
 // routeRequest dispatches requests to appropriate handlers.
 func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
@@ -53,14 +61,37 @@ func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bucket operations
+	// Determine if this is a bucket-only path (/{bucket}) or an object path (/{bucket}/{key}).
+	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
+	if len(parts) == 1 {
+		// Bucket operations
+		switch r.Method {
+		case http.MethodPut:
+			h.handleCreateBucket(w, r)
+		case http.MethodDelete:
+			h.handleDeleteBucket(w, r)
+		case http.MethodHead:
+			h.handleHeadBucket(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+
+	// Object operations
 	switch r.Method {
+	case http.MethodGet:
+		h.handleGetObject(w, r)
 	case http.MethodPut:
-		h.handleCreateBucket(w, r)
+		if r.Header.Get("x-amz-copy-source") != "" {
+			h.handleCopyObject(w, r)
+		} else {
+			h.handlePutObject(w, r)
+		}
 	case http.MethodDelete:
-		h.handleDeleteBucket(w, r)
+		h.handleDeleteObject(w, r)
 	case http.MethodHead:
-		h.handleHeadBucket(w, r)
+		h.handleHeadObject(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
