@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Backend defines the interface for object storage operations.
@@ -136,7 +137,7 @@ var (
 
 // IsValidObjectKey validates the constraints shared by general-purpose S3 buckets.
 func IsValidObjectKey(key string) bool {
-	return key != "" && len([]byte(key)) <= 1024
+	return key != "" && len(key) <= 1024 && utf8.ValidString(key)
 }
 
 // ConditionsMatch reports whether an existing object satisfies write preconditions.

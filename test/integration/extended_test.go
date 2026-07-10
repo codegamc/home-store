@@ -75,6 +75,47 @@ func TestObjectSemantics(t *testing.T) {
 	require.NoError(t, err, "deleting a missing key is idempotent")
 }
 
+func TestRangeAndReadConditions(t *testing.T) {
+	ctx := context.Background()
+	bucket := generateBucketName("read-conditions")
+	defer cleanupBucket(ctx, bucket)
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	require.NoError(t, err)
+	put, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket), Key: aws.String("value"), Body: bytes.NewReader([]byte("abcdef")),
+	})
+	require.NoError(t, err)
+
+	for _, test := range []struct {
+		name, value, want string
+	}{
+		{name: "closed", value: "bytes=1-3", want: "bcd"},
+		{name: "open ended", value: "bytes=3-", want: "def"},
+		{name: "suffix", value: "bytes=-2", want: "ef"},
+		{name: "clamped", value: "bytes=4-99", want: "ef"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String("value"), Range: aws.String(test.value)})
+			require.NoError(t, err)
+			body, err := io.ReadAll(output.Body)
+			output.Body.Close()
+			require.NoError(t, err)
+			assert.Equal(t, test.want, string(body))
+		})
+	}
+	for _, value := range []string{"bytes=99-100", "bytes=4-2", "bytes=0-1,3-4", "items=0-1"} {
+		_, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String("value"), Range: aws.String(value)})
+		require.Error(t, err, value)
+	}
+
+	response := signedRequest(t, http.MethodGet, fmt.Sprintf("/%s/value", bucket), nil, map[string]string{"If-None-Match": aws.ToString(put.ETag)})
+	response.Body.Close()
+	assert.Equal(t, http.StatusNotModified, response.StatusCode)
+	response = signedRequest(t, http.MethodHead, fmt.Sprintf("/%s/value", bucket), nil, map[string]string{"If-Match": `"stale"`})
+	response.Body.Close()
+	assert.Equal(t, http.StatusPreconditionFailed, response.StatusCode)
+}
+
 func TestConditionalWrites(t *testing.T) {
 	ctx := context.Background()
 	bucket := generateBucketName("conditional")
@@ -132,6 +173,30 @@ func TestDeleteObjectsAndPagination(t *testing.T) {
 	assert.Len(t, second.Contents, 1)
 	_, err = client.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: aws.String(bucket), Delete: &types.Delete{Objects: []types.ObjectIdentifier{{Key: aws.String("a")}, {Key: aws.String("missing")}, {Key: aws.String("b")}}}})
 	require.NoError(t, err)
+}
+
+func TestDelimiterPaginationDoesNotRepeatCommonPrefix(t *testing.T) {
+	ctx := context.Background()
+	bucket := generateBucketName("delimiter-page")
+	defer cleanupBucket(ctx, bucket)
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	require.NoError(t, err)
+	for _, key := range []string{"dir/a", "dir/b", "z"} {
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: bytes.NewReader([]byte(key))})
+		require.NoError(t, err)
+	}
+	first, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket), Delimiter: aws.String("/"), MaxKeys: aws.Int32(1)})
+	require.NoError(t, err)
+	require.Len(t, first.CommonPrefixes, 1)
+	assert.Equal(t, "dir/", aws.ToString(first.CommonPrefixes[0].Prefix))
+	require.True(t, aws.ToBool(first.IsTruncated))
+	second, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucket), Delimiter: aws.String("/"), MaxKeys: aws.Int32(1), ContinuationToken: first.NextContinuationToken,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, second.CommonPrefixes)
+	require.Len(t, second.Contents, 1)
+	assert.Equal(t, "z", aws.ToString(second.Contents[0].Key))
 }
 
 func TestUnsupportedSubresourceReturnsS3NotImplemented(t *testing.T) {
@@ -203,5 +268,38 @@ func TestMultipartUpload(t *testing.T) {
 	aborted, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String("aborted.bin")})
 	require.NoError(t, err)
 	_, err = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String("aborted.bin"), UploadId: aborted.UploadId})
+	require.NoError(t, err)
+}
+
+func TestMultipartRejectsInvalidCompletion(t *testing.T) {
+	ctx := context.Background()
+	bucket := generateBucketName("multipart-invalid")
+	defer cleanupBucket(ctx, bucket)
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	require.NoError(t, err)
+	created, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String("invalid.bin")})
+	require.NoError(t, err)
+	first, err := client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket: aws.String(bucket), Key: aws.String("invalid.bin"), UploadId: created.UploadId, PartNumber: aws.Int32(1), Body: bytes.NewReader([]byte("small")),
+	})
+	require.NoError(t, err)
+	second, err := client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket: aws.String(bucket), Key: aws.String("invalid.bin"), UploadId: created.UploadId, PartNumber: aws.Int32(2), Body: bytes.NewReader([]byte("tail")),
+	})
+	require.NoError(t, err)
+
+	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket: aws.String(bucket), Key: aws.String("invalid.bin"), UploadId: created.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: []types.CompletedPart{{PartNumber: aws.Int32(1), ETag: aws.String(`"wrong"`)}}},
+	})
+	require.Error(t, err)
+	_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket: aws.String(bucket), Key: aws.String("invalid.bin"), UploadId: created.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: []types.CompletedPart{
+			{PartNumber: aws.Int32(1), ETag: first.ETag}, {PartNumber: aws.Int32(2), ETag: second.ETag},
+		}},
+	})
+	require.Error(t, err, "a non-final part smaller than 5 MiB must fail")
+	_, err = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String("invalid.bin"), UploadId: created.UploadId})
 	require.NoError(t, err)
 }

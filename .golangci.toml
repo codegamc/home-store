@@ -3,6 +3,5 @@ version = "2"
 [linters]
 enable = ["errcheck", "govet", "staticcheck"]
 
-[linters-settings.errcheck]
+[linters.settings.errcheck]
 check-type-assertions = true
-check-blank = true

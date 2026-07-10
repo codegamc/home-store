@@ -3,6 +3,7 @@
 import io
 
 import pytest
+from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
 
@@ -21,6 +22,21 @@ class TestPutObject:
             ContentType="text/plain",
         )
         assert "ETag" in response
+
+    def test_transfer_manager_uses_multipart(self, s3_client, unique_name, cleanup_buckets):
+        bucket = cleanup_buckets(unique_name("transfer-multipart"))
+        s3_client.create_bucket(Bucket=bucket)
+        body = b"a" * (5 * 1024 * 1024) + b"tail"
+        config = TransferConfig(
+            multipart_threshold=5 * 1024 * 1024,
+            multipart_chunksize=5 * 1024 * 1024,
+        )
+
+        s3_client.upload_fileobj(io.BytesIO(body), bucket, "large.bin", Config=config)
+
+        response = s3_client.get_object(Bucket=bucket, Key="large.bin")
+        assert response["Body"].read() == body
+        assert "-2" in response["ETag"]
 
 
 class TestGetObject:
