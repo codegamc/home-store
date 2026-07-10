@@ -1,0 +1,24 @@
+services:
+  home-store:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: home-store:local
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      HOME_STORE_ACCESS_KEY: homestore
+      HOME_STORE_SECRET_KEY_FILE: /run/secrets/home_store_secret
+      HOME_STORE_LOG_LEVEL: info
+    secrets:
+      - home_store_secret
+    volumes:
+      - home_store_state:/var/lib/home-store
+
+secrets:
+  home_store_secret:
+    file: ./home-store-secret.txt
+
+volumes:
+  home_store_state:

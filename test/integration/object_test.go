@@ -202,5 +202,12 @@ func TestListObjectsV2(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	t.Skip("ListObjectsV2 not yet implemented")
+	output, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket)})
+	require.NoError(t, err)
+	require.Len(t, output.Contents, len(keys))
+	got := make([]string, 0, len(output.Contents))
+	for _, object := range output.Contents {
+		got = append(got, aws.ToString(object.Key))
+	}
+	assert.Equal(t, keys, got)
 }

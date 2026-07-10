@@ -20,13 +20,9 @@ def find_or_build_binary():
     if bin_path and os.path.isfile(bin_path):
         return bin_path
 
-    # Try to find binary in ../bin/
     workspace_root = find_workspace_root()
-    bin_path = os.path.join(workspace_root, "bin", "home-store")
-    if os.path.isfile(bin_path):
-        return bin_path
-
-    # Build the binary
+    build_dir = tempfile.mkdtemp(prefix="home-store-python-bin-")
+    bin_path = os.path.join(build_dir, "home-store")
     print("Building home-store binary...")
     result = subprocess.run(
         ["go", "build", "-o", bin_path, "./cmd/home-store"],
@@ -35,6 +31,8 @@ def find_or_build_binary():
         text=True,
     )
     if result.returncode != 0:
+        import shutil
+        shutil.rmtree(build_dir, ignore_errors=True)
         raise RuntimeError(f"Failed to build binary: {result.stderr}")
     return bin_path
 
@@ -85,8 +83,13 @@ def server():
 
     proc = subprocess.Popen(
         [bin_path, "-addr", addr, "-data-dir", data_dir],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={
+            **os.environ,
+            "HOME_STORE_ACCESS_KEY": "test-access-key",
+            "HOME_STORE_SECRET_KEY": "test-secret-key",
+        },
     )
 
     try:
@@ -102,6 +105,8 @@ def server():
         # Clean up temp directory
         import shutil
         shutil.rmtree(data_dir, ignore_errors=True)
+        if not os.environ.get("HOME_STORE_BIN"):
+            shutil.rmtree(os.path.dirname(bin_path), ignore_errors=True)
 
 
 @pytest.fixture(scope="session")

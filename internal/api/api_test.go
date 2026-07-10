@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,13 +18,16 @@ var _ storage.Backend = (*mockBackend)(nil)
 
 type mockBackend struct{}
 
-func (m *mockBackend) CreateBucket(ctx context.Context, name string) error { return nil }
-func (m *mockBackend) DeleteBucket(ctx context.Context, name string) error { return nil }
+func (m *mockBackend) CreateBucket(ctx context.Context, name, location string) error { return nil }
+func (m *mockBackend) DeleteBucket(ctx context.Context, name string) error           { return nil }
 func (m *mockBackend) BucketExists(ctx context.Context, name string) (bool, error) {
 	return false, nil
 }
 func (m *mockBackend) ListBuckets(ctx context.Context) ([]storage.BucketInfo, error) {
 	return nil, nil
+}
+func (m *mockBackend) GetBucket(ctx context.Context, name string) (storage.BucketInfo, error) {
+	return storage.BucketInfo{}, storage.ErrBucketNotFound
 }
 func (m *mockBackend) PutObject(ctx context.Context, bucket, key string, body io.Reader, meta storage.ObjectMeta) error {
 	return nil
@@ -37,6 +41,12 @@ func (m *mockBackend) HeadObject(ctx context.Context, bucket, key string) (stora
 }
 func (m *mockBackend) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) (storage.ObjectMeta, error) {
 	return storage.ObjectMeta{}, nil
+}
+func (m *mockBackend) PutObjectConditional(ctx context.Context, bucket, key string, body io.Reader, meta storage.ObjectMeta, conditions storage.Conditions) (storage.ObjectMeta, error) {
+	return meta, nil
+}
+func (m *mockBackend) ListObjects(ctx context.Context, bucket string, opts storage.ListOptions) (storage.ListResult, error) {
+	return storage.ListResult{}, nil
 }
 
 func TestNewHandler(t *testing.T) {
@@ -52,11 +62,11 @@ type mockBackendWithBuckets struct {
 	buckets map[string]*storage.BucketInfo
 }
 
-func (m *mockBackendWithBuckets) CreateBucket(ctx context.Context, name string) error {
+func (m *mockBackendWithBuckets) CreateBucket(ctx context.Context, name, location string) error {
 	if _, exists := m.buckets[name]; exists {
 		return storage.ErrBucketExists
 	}
-	m.buckets[name] = &storage.BucketInfo{Name: name}
+	m.buckets[name] = &storage.BucketInfo{Name: name, Region: location}
 	return nil
 }
 
@@ -80,6 +90,13 @@ func (m *mockBackendWithBuckets) BucketExists(ctx context.Context, name string) 
 	_, exists := m.buckets[name]
 	return exists, nil
 }
+func (m *mockBackendWithBuckets) GetBucket(ctx context.Context, name string) (storage.BucketInfo, error) {
+	value, ok := m.buckets[name]
+	if !ok {
+		return storage.BucketInfo{}, storage.ErrBucketNotFound
+	}
+	return *value, nil
+}
 func (m *mockBackendWithBuckets) PutObject(ctx context.Context, bucket, key string, body io.Reader, meta storage.ObjectMeta) error {
 	return nil
 }
@@ -94,6 +111,12 @@ func (m *mockBackendWithBuckets) HeadObject(ctx context.Context, bucket, key str
 }
 func (m *mockBackendWithBuckets) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) (storage.ObjectMeta, error) {
 	return storage.ObjectMeta{}, nil
+}
+func (m *mockBackendWithBuckets) PutObjectConditional(ctx context.Context, bucket, key string, body io.Reader, meta storage.ObjectMeta, conditions storage.Conditions) (storage.ObjectMeta, error) {
+	return meta, nil
+}
+func (m *mockBackendWithBuckets) ListObjects(ctx context.Context, bucket string, opts storage.ListOptions) (storage.ListResult, error) {
+	return storage.ListResult{}, nil
 }
 
 func TestListBuckets(t *testing.T) {
@@ -139,6 +162,42 @@ func TestCreateBucket(t *testing.T) {
 	exists, err := backend.BucketExists(context.Background(), "test-bucket")
 	if err != nil || !exists {
 		t.Error("bucket was not created")
+	}
+
+	if backend.buckets["test-bucket"].Region != "" {
+		t.Errorf("expected empty location override, got %q", backend.buckets["test-bucket"].Region)
+	}
+}
+
+func TestCreateBucketWithLocationConstraint(t *testing.T) {
+	backend := &mockBackendWithBuckets{buckets: make(map[string]*storage.BucketInfo)}
+	handler := NewHandler(backend)
+
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket", strings.NewReader(
+		`<CreateBucketConfiguration><LocationConstraint>us-west-2</LocationConstraint></CreateBucketConfiguration>`,
+	))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	if backend.buckets["test-bucket"].Region != "us-west-2" {
+		t.Errorf("expected location override us-west-2, got %q", backend.buckets["test-bucket"].Region)
+	}
+}
+
+func TestCreateBucketWithInvalidXML(t *testing.T) {
+	backend := &mockBackendWithBuckets{buckets: make(map[string]*storage.BucketInfo)}
+	handler := NewHandler(backend)
+
+	req := httptest.NewRequest(http.MethodPut, "/test-bucket", strings.NewReader("<CreateBucketConfiguration>"))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
 	}
 }
 

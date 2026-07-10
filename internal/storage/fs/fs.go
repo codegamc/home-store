@@ -2,31 +2,32 @@ package fs
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/codegamc/home-store/internal/storage"
+	"golang.org/x/sys/unix"
 )
 
 // FSBackend is a filesystem-backed implementation of storage.Backend.
 type FSBackend struct {
 	basePath  string
-	metaStore *FSMetadataStore
+	location  string
+	metaStore *SQLiteMetadataStore
+	blobPath  string
+	tmpPath   string
+	lockFile  *os.File
+	mu        sync.RWMutex
 }
 
-// bucketMetadata stores bucket metadata on disk.
+// bucketMetadata is the legacy on-disk bucket metadata format.
 type bucketMetadata struct {
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
 	Region    string    `json:"region"`
-}
-
-// bucketMetadataPath returns the path to the bucket metadata file.
-func (f *FSBackend) bucketMetadataPath(name string) string {
-	return filepath.Join(f.basePath, "bucket_metadata", name, ".bucket.json")
 }
 
 // bucketPath returns the path to the bucket directory.
@@ -35,79 +36,148 @@ func (f *FSBackend) bucketPath(name string) string {
 }
 
 // NewBackend creates a new filesystem backend with the given base path.
-func NewBackend(basePath string) (*FSBackend, error) {
-	if err := os.MkdirAll(basePath, 0755); err != nil {
+func NewBackend(basePath, dbPath, location string) (*FSBackend, error) {
+	if err := os.MkdirAll(basePath, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create base path: %w", err)
 	}
-	metaStore, err := NewFSMetadataStore(basePath)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
+		return nil, fmt.Errorf("failed to create database directory: %w", err)
+	}
+	lockFile, err := os.OpenFile(dbPath+".lock", os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
+		return nil, fmt.Errorf("failed to open store lock: %w", err)
+	}
+	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("data store is already in use: %w", err)
+	}
+
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			// The SQLite store below will initialize a new versioned database.
+		} else {
+			_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+			_ = lockFile.Close()
+			return nil, fmt.Errorf("failed to inspect metadata database path: %w", err)
+		}
+	}
+
+	metaStore, err := NewSQLiteMetadataStore(dbPath)
+	if err != nil {
+		_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+		_ = lockFile.Close()
 		return nil, fmt.Errorf("failed to create metadata store: %w", err)
 	}
-	return &FSBackend{
+
+	legacyComplete, err := metaStore.MigrationCompleted(context.Background(), "legacy-json-v1")
+	if err != nil {
+		_ = metaStore.Close()
+		_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("failed to inspect legacy migration state: %w", err)
+	}
+	if !legacyComplete {
+		if err := migrateLegacyMetadata(context.Background(), basePath, metaStore); err != nil {
+			_ = metaStore.Close()
+			_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+			_ = lockFile.Close()
+			return nil, fmt.Errorf("failed to migrate legacy metadata: %w", err)
+		}
+		if err := metaStore.MarkMigrationCompleted(context.Background(), "legacy-json-v1"); err != nil {
+			_ = metaStore.Close()
+			_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+			_ = lockFile.Close()
+			return nil, fmt.Errorf("failed to complete legacy migration: %w", err)
+		}
+	}
+	blobPath := filepath.Join(basePath, ".home-store", "blobs")
+	tmpPath := filepath.Join(basePath, ".home-store", "tmp")
+	if err := os.MkdirAll(blobPath, 0700); err != nil {
+		_ = metaStore.Close()
+		_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, err
+	}
+	if err := os.MkdirAll(tmpPath, 0700); err != nil {
+		_ = metaStore.Close()
+		_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, err
+	}
+	backend := &FSBackend{
 		basePath:  basePath,
+		location:  location,
 		metaStore: metaStore,
-	}, nil
+		blobPath:  blobPath,
+		tmpPath:   tmpPath,
+		lockFile:  lockFile,
+	}
+	if err := backend.migrateDirectObjects(context.Background()); err != nil {
+		_ = backend.Close()
+		return nil, fmt.Errorf("failed to migrate direct object layout: %w", err)
+	}
+	if err := backend.cleanupOrphanBlobs(context.Background()); err != nil {
+		_ = backend.Close()
+		return nil, fmt.Errorf("failed to reconcile object blobs: %w", err)
+	}
+	return backend, nil
 }
 
 // CreateBucket creates a new bucket.
-func (f *FSBackend) CreateBucket(ctx context.Context, name string) error {
+func (f *FSBackend) CreateBucket(ctx context.Context, name, location string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	bucketPath := f.bucketPath(name)
-	metaPath := f.bucketMetadataPath(name)
 
-	// Check if bucket already exists using metadata file
-	if _, err := os.Stat(metaPath); err == nil {
+	exists, err := f.metaStore.BucketExists(ctx, name)
+	if err != nil {
+		return err
+	}
+	if exists {
 		return storage.ErrBucketExists
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("failed to check bucket existence: %w", err)
 	}
 
 	// Create bucket directory
-	if err := os.MkdirAll(bucketPath, 0755); err != nil {
+	if err := os.MkdirAll(bucketPath, 0700); err != nil {
 		return fmt.Errorf("failed to create bucket directory: %w", err)
 	}
 
-	// Write bucket metadata
-	meta := bucketMetadata{
+	if location == "" {
+		location = f.location
+	}
+
+	return f.metaStore.PutBucket(ctx, storage.BucketInfo{
 		Name:      name,
 		CreatedAt: time.Now(),
-		Region:    "us-east-1",
-	}
-
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal bucket metadata: %w", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(metaPath), 0755); err != nil {
-		return fmt.Errorf("failed to create bucket metadata directory: %w", err)
-	}
-
-	if err := os.WriteFile(metaPath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write bucket metadata: %w", err)
-	}
-
-	return nil
+		Region:    location,
+	})
 }
 
 // DeleteBucket deletes a bucket.
 func (f *FSBackend) DeleteBucket(ctx context.Context, name string) error {
-	bucketPath := f.bucketPath(name)
-
-	// Check if bucket exists
-	if _, err := os.Stat(bucketPath); os.IsNotExist(err) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	exists, err := f.metaStore.BucketExists(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !exists {
 		return storage.ErrBucketNotFound
-	} else if err != nil {
-		return fmt.Errorf("failed to check bucket existence: %w", err)
+	}
+	objects, err := f.metaStore.ListMetadata(ctx, name, "")
+	if err != nil {
+		return err
+	}
+	hasUploads, err := f.metaStore.BucketHasMultipartUploads(ctx, name)
+	if err != nil {
+		return err
+	}
+	if len(objects) != 0 || hasUploads {
+		return storage.ErrBucketNotEmpty
 	}
 
-	// Remove entire bucket directory
-	if err := os.RemoveAll(bucketPath); err != nil {
-		return fmt.Errorf("failed to delete bucket: %w", err)
-	}
-
-	// Remove bucket metadata directory
-	if err := os.RemoveAll(filepath.Dir(f.bucketMetadataPath(name))); err != nil {
-		return fmt.Errorf("failed to delete bucket metadata: %w", err)
+	if err := f.metaStore.DeleteBucket(ctx, name); err != nil {
+		return err
 	}
 
 	return nil
@@ -115,47 +185,29 @@ func (f *FSBackend) DeleteBucket(ctx context.Context, name string) error {
 
 // ListBuckets returns all buckets.
 func (f *FSBackend) ListBuckets(ctx context.Context) ([]storage.BucketInfo, error) {
-	entries, err := os.ReadDir(f.basePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read base path: %w", err)
-	}
-
-	var buckets []storage.BucketInfo
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		metaPath := f.bucketMetadataPath(entry.Name())
-		data, err := os.ReadFile(metaPath)
-		if err != nil {
-			continue // Skip directories without metadata
-		}
-
-		var meta bucketMetadata
-		if err := json.Unmarshal(data, &meta); err != nil {
-			continue // Skip invalid metadata
-		}
-
-		buckets = append(buckets, storage.BucketInfo{
-			Name:      meta.Name,
-			CreatedAt: meta.CreatedAt,
-			Region:    meta.Region,
-		})
-	}
-
-	return buckets, nil
+	return f.metaStore.ListBuckets(ctx)
 }
 
 // BucketExists checks if a bucket exists.
 func (f *FSBackend) BucketExists(ctx context.Context, name string) (bool, error) {
-	metaPath := f.bucketMetadataPath(name)
-	_, err := os.Stat(metaPath)
-	if err == nil {
-		return true, nil
+	return f.metaStore.BucketExists(ctx, name)
+}
+
+func (f *FSBackend) GetBucket(ctx context.Context, name string) (storage.BucketInfo, error) {
+	return f.metaStore.GetBucket(ctx, name)
+}
+
+// Close releases backend resources.
+func (f *FSBackend) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	err := f.metaStore.Close()
+	if f.lockFile != nil {
+		_ = unix.Flock(int(f.lockFile.Fd()), unix.LOCK_UN)
+		if closeErr := f.lockFile.Close(); err == nil {
+			err = closeErr
+		}
+		f.lockFile = nil
 	}
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	return false, fmt.Errorf("failed to check bucket existence: %w", err)
+	return err
 }
