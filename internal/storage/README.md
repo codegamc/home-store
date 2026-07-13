@@ -4,7 +4,7 @@ This package provides the core storage interfaces and implementations for home-s
 
 ## Metadata Storage
 
-The `MetadataStore` interface allows for metadata storage operations. Currently, the filesystem backend is provided.
+The `MetadataStore` interface allows backend implementations to persist object metadata. Currently, the filesystem backend is provided.
 
 ### Filesystem Backend (fs)
 
@@ -13,22 +13,21 @@ Stores metadata as JSON files alongside objects in a `.metadata` subdirectory wi
 ```go
 import "github.com/codegamc/home-store/internal/storage/fs"
 
-// Create a filesystem metadata store
+// Create a filesystem-backed object store.
 backend, err := fs.NewBackend("/data/path")
 if err != nil {
     log.Fatal(err)
 }
 
-// Store metadata
-meta := storage.ObjectMeta{
-    ContentType:   "text/plain",
-    ContentLength: 1024,
-    ETag:          "abc123",
-    LastModified:  time.Now(),
-    UserMetadata:  map[string]string{"key": "value"},
+if err := backend.CreateBucket(context.Background(), "my-bucket"); err != nil {
+    log.Fatal(err)
 }
 
-err = backend.metadataStore.PutMetadata(ctx, "my-bucket", "my-object", meta)
+// Metadata is stored alongside an object when it is written.
+err = backend.PutObject(context.Background(), "my-bucket", "my-object", strings.NewReader("contents"), storage.ObjectMeta{
+    ContentType:   "text/plain",
+    UserMetadata:  map[string]string{"key": "value"},
+})
 ```
 
 **Pros:**

@@ -23,7 +23,8 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	meta := storage.ObjectMeta{
-		ContentType: contentType,
+		ContentType:  contentType,
+		UserMetadata: userMetadata(r.Header),
 	}
 
 	if err := h.backend.PutObject(r.Context(), bucket, key, r.Body, meta); err != nil {
@@ -49,23 +50,25 @@ func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request) {
 
 	reader, meta, err := h.backend.GetObject(r.Context(), bucket, key)
 	if err != nil {
-		if err == storage.ErrObjectNotFound {
+		switch err {
+		case storage.ErrObjectNotFound:
 			h.errorResponseWithResource(w, http.StatusNotFound, s3.NoSuchKey, "the specified key does not exist", r.URL.Path)
-		} else if err == storage.ErrBucketNotFound {
+		case storage.ErrBucketNotFound:
 			h.errorResponseWithResource(w, http.StatusNotFound, s3.NoSuchBucket, "the specified bucket does not exist", fmt.Sprintf("/%s", bucket))
-		} else {
+		default:
 			h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to retrieve object")
 		}
 		return
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	w.Header().Set("Content-Type", meta.ContentType)
 	w.Header().Set("Content-Length", strconv.FormatInt(meta.ContentLength, 10))
 	w.Header().Set("ETag", meta.ETag)
 	w.Header().Set("Last-Modified", meta.LastModified.UTC().Format(http.TimeFormat))
+	writeUserMetadata(w.Header(), meta.UserMetadata)
 	w.WriteHeader(http.StatusOK)
-	io.Copy(w, reader)
+	_, _ = io.Copy(w, reader)
 }
 
 // handleHeadObject handles HEAD /{bucket}/{key}.
@@ -74,11 +77,12 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 
 	meta, err := h.backend.HeadObject(r.Context(), bucket, key)
 	if err != nil {
-		if err == storage.ErrObjectNotFound {
+		switch err {
+		case storage.ErrObjectNotFound:
 			h.errorResponseWithResource(w, http.StatusNotFound, s3.NoSuchKey, "the specified key does not exist", r.URL.Path)
-		} else if err == storage.ErrBucketNotFound {
+		case storage.ErrBucketNotFound:
 			h.errorResponseWithResource(w, http.StatusNotFound, s3.NoSuchBucket, "the specified bucket does not exist", fmt.Sprintf("/%s", bucket))
-		} else {
+		default:
 			h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to retrieve object metadata")
 		}
 		return
@@ -88,7 +92,25 @@ func (h *Handler) handleHeadObject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(meta.ContentLength, 10))
 	w.Header().Set("ETag", meta.ETag)
 	w.Header().Set("Last-Modified", meta.LastModified.UTC().Format(http.TimeFormat))
+	writeUserMetadata(w.Header(), meta.UserMetadata)
 	w.WriteHeader(http.StatusOK)
+}
+
+func userMetadata(header http.Header) map[string]string {
+	metadata := make(map[string]string)
+	for name, values := range header {
+		if !strings.HasPrefix(strings.ToLower(name), "x-amz-meta-") || len(values) == 0 {
+			continue
+		}
+		metadata[strings.TrimPrefix(strings.ToLower(name), "x-amz-meta-")] = values[0]
+	}
+	return metadata
+}
+
+func writeUserMetadata(header http.Header, metadata map[string]string) {
+	for key, value := range metadata {
+		header.Set("x-amz-meta-"+key, value)
+	}
 }
 
 // handleDeleteObject handles DELETE /{bucket}/{key}.
@@ -96,11 +118,12 @@ func (h *Handler) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 	bucket, key := parseBucketKey(r.URL.Path)
 
 	if err := h.backend.DeleteObject(r.Context(), bucket, key); err != nil {
-		if err == storage.ErrObjectNotFound {
+		switch err {
+		case storage.ErrObjectNotFound:
 			h.errorResponseWithResource(w, http.StatusNotFound, s3.NoSuchKey, "the specified key does not exist", r.URL.Path)
-		} else if err == storage.ErrBucketNotFound {
+		case storage.ErrBucketNotFound:
 			h.errorResponseWithResource(w, http.StatusNotFound, s3.NoSuchBucket, "the specified bucket does not exist", fmt.Sprintf("/%s", bucket))
-		} else {
+		default:
 			h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to delete object")
 		}
 		return
@@ -124,11 +147,12 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request) {
 
 	meta, err := h.backend.CopyObject(r.Context(), srcBucket, srcKey, dstBucket, dstKey)
 	if err != nil {
-		if err == storage.ErrObjectNotFound {
+		switch err {
+		case storage.ErrObjectNotFound:
 			h.errorResponseWithResource(w, http.StatusNotFound, s3.NoSuchKey, "the specified key does not exist", fmt.Sprintf("/%s/%s", srcBucket, srcKey))
-		} else if err == storage.ErrBucketNotFound {
+		case storage.ErrBucketNotFound:
 			h.errorResponseWithResource(w, http.StatusNotFound, s3.NoSuchBucket, "the specified bucket does not exist", fmt.Sprintf("/%s", srcBucket))
-		} else {
+		default:
 			h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to copy object")
 		}
 		return
@@ -141,6 +165,6 @@ func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(xml.Header))
-	xml.NewEncoder(w).Encode(resp)
+	_, _ = w.Write([]byte(xml.Header))
+	_ = xml.NewEncoder(w).Encode(resp)
 }

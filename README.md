@@ -1,12 +1,12 @@
 # Home Store
 
-Home Store is an "object storage" server designed for home-lab use. It is tested to be compatible with the AWS S3 API.
+Home Store is a filesystem-backed S3-compatible object-storage server for trusted home-lab networks. Its implemented APIs are exercised against the AWS SDK for Go v2 and Python boto3.
 
 ## Goals
 
 The goal of this server is for easy and effortless deployment of a correct object storage API for users to self-host on "Home Lab" servers on their LAN. This means that some of decisions made for this may not match "production" servers that would be used in a commercial context, but make it easier and lower-maintainence for an individual. The representative user of this is an individual who would want to run an object storage API on their NAS, maybe alongside NFS, so they can self host software that depends on object storage. For this user, it may sit idle for hours, and the software that calls it may not experience a sustained load. It will store data for a household. 
 
-* Perfect compliance with the Go, Python AWS Client Libraries, for implemented APIs
+* Compatibility with the Go and Python AWS client libraries for the implemented API surface.
 
 ## Non-Goals
 
@@ -17,11 +17,30 @@ This software is not designed to be run in a commercial setting. While it strive
 
 ## Running
 
-TODO - The goal is to support a simple binary, docker, and synology package
+Build and run a local binary:
+
+```bash
+make build
+./bin/home-store -data-dir /srv/home-store
+```
+
+The server listens on `0.0.0.0:9000` by default. Set `HOME_STORE_ADDR` or `HOME_STORE_DATA_DIR`, or pass `-addr` and `-data-dir`, to configure it.
+
+Build and run the container image:
+
+```bash
+make docker
+sudo install -d -o 65532 -g 65532 /srv/home-store
+docker run --rm -p 9000:9000 -v /srv/home-store:/data home-store:dev
+```
+
+For Synology, use the same image in Container Manager and mount a persistent shared folder at `/data`. A native Synology package is not currently provided.
+
+> **Authentication TODO:** S3 signature verification and credential management are not implemented. The server currently accepts requests from any client that can reach it. Bind it only to a strictly trusted LAN and do not expose it to the internet.
 
 ## Backing Data
 
-TODO - Currently, locally on file system, goal also to support NFS...?
+Data is stored on the local filesystem under the configured data directory. The directory may be an NFS mount managed by the host, provided the server process has reliable read/write access.
 
 ## API Coverage
 
@@ -42,7 +61,7 @@ Here is the status and coverage of core object storage APIs...
 | CreateBucket | Done | ✅ | ✅ |
 | DeleteBucket | Done | ✅ | ✅ |
 | HeadBucket | Done | ✅ | ✅ |
-| GetBucketLocation | Planned | ❌ | ❌ |
+| GetBucketLocation | Done | ✅ | ✅ |
 
 #### Object Operations
 
@@ -51,25 +70,25 @@ Here is the status and coverage of core object storage APIs...
 | PutObject | Done | ✅ | ✅ |
 | GetObject | Done | ✅ | ✅ |
 | DeleteObject | Done | ✅ | ✅ |
-| DeleteObjects | Planned | ❌ | ❌ |
+| DeleteObjects | Done | ✅ | ✅ |
 | HeadObject | Done | ✅ | ✅ |
 | CopyObject | Done | ✅ | ✅ |
-| ListObjects | Planned | ❌ | ❌ |
-| ListObjectsV2 | Planned | ❌ | ❌ |
-| GetObjectAttributes | Planned | ❌ | ❌ |
-| RenameObject | Planned | ❌ | ❌ |
+| ListObjects | Done | ✅ | ✅ |
+| ListObjectsV2 | Done | ✅ | ✅ |
+| GetObjectAttributes | Done | ✅ | ✅ |
+| RenameObject | Done | ✅ | Manual API test |
 
 #### Multi-Part Operations
 
 | Operation | Status | Go AWS SDK v2 | Python boto3 |
 |-----------|--------|---------------|--------------|
-| AbortMultipartUpload | Planned | ❌ | ❌ |
-| CompleteMultipartUpload | Planned | ❌ | ❌ |
-| CreateMultipartUpload | Planned | ❌ | ❌ |
-| ListMultipartUploads | Planned | ❌ | ❌ |
-| ListParts | Planned | ❌ | ❌ |
-| UploadPart | Planned | ❌ | ❌ |
-| UploadPartCopy | Planned | ❌ | ❌ |
+| AbortMultipartUpload | Done | ✅ | ✅ |
+| CompleteMultipartUpload | Done | ✅ | ✅ |
+| CreateMultipartUpload | Done | ✅ | ✅ |
+| ListMultipartUploads | Done | ✅ | ✅ |
+| ListParts | Done | ✅ | ✅ |
+| UploadPart | Done | ✅ | ✅ |
+| UploadPartCopy | Done | ✅ | ✅ |
 
 
 
@@ -167,17 +186,17 @@ Here is the status and coverage of core object storage APIs...
 
 ## Development
 
-TODO - This is going to be a single-binary server written in Golang.
+Home Store is a single-binary Go server. Use `make build`, `make test`, `make integration-test`, and `make lint` during development.
 
 ## Testing
 
-Integration tests are located in `test/integration/` and currently test against the **Go AWS SDK v2** (`aws-sdk-go-v2`). Tests cover bucket CRUD operations, object put/get/delete/head/copy, and error handling.
+Integration tests are located in `test/integration/`. They start an isolated server and validate bucket CRUD/location, object CRUD/copy/metadata/attributes, object listing, multi-object delete, multipart upload flows, and error handling.
 
 **Tested:**
 - ✅ Go AWS SDK v2 (`aws-sdk-go-v2/service/s3`)
+- ✅ Python boto3
 
 **Planned:**
-- ❌ Python boto3
 - ❌ Non-AWS SDKs (e.g., MinIO SDK)
 
-TODO - We want to have CI/CD running to automate testing.
+GitHub Actions runs lint, unit tests, and both integration suites on every pull request and on pushes to `main`.

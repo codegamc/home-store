@@ -15,6 +15,7 @@ type Backend interface {
 	DeleteBucket(ctx context.Context, name string) error
 	ListBuckets(ctx context.Context) ([]BucketInfo, error)
 	BucketExists(ctx context.Context, name string) (bool, error)
+	GetBucketLocation(ctx context.Context, name string) (string, error)
 
 	// Object operations
 	PutObject(ctx context.Context, bucket, key string, body io.Reader, meta ObjectMeta) error
@@ -22,6 +23,16 @@ type Backend interface {
 	DeleteObject(ctx context.Context, bucket, key string) error
 	HeadObject(ctx context.Context, bucket, key string) (ObjectMeta, error)
 	CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) (ObjectMeta, error)
+	RenameObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) (ObjectMeta, error)
+	ListObjects(ctx context.Context, bucket string, options ListOptions) (ListResult, error)
+
+	// Multipart upload operations.
+	CreateMultipartUpload(ctx context.Context, bucket, key string, meta ObjectMeta) (MultipartUpload, error)
+	UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, body io.Reader) (MultipartPart, error)
+	CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []CompletedPart) (ObjectMeta, error)
+	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
+	ListMultipartUploads(ctx context.Context, bucket string) ([]MultipartUpload, error)
+	ListParts(ctx context.Context, bucket, key, uploadID string) ([]MultipartPart, error)
 }
 
 // BucketInfo contains metadata about a bucket.
@@ -33,6 +44,7 @@ type BucketInfo struct {
 
 // ObjectMeta contains metadata about an object.
 type ObjectMeta struct {
+	Key           string
 	ContentType   string
 	ContentLength int64
 	ETag          string
@@ -50,9 +62,10 @@ type ListOptions struct {
 
 // ListResult contains the results of a list operation.
 type ListResult struct {
-	Objects     []ObjectInfo
-	IsTruncated bool
-	NextMarker  string
+	Objects        []ObjectInfo
+	CommonPrefixes []string
+	IsTruncated    bool
+	NextMarker     string
 }
 
 // ObjectInfo contains basic information about an object.
@@ -63,13 +76,38 @@ type ObjectInfo struct {
 	ETag         string
 }
 
+// MultipartUpload describes an in-progress multipart upload.
+type MultipartUpload struct {
+	UploadID  string
+	Key       string
+	Initiated time.Time
+	Meta      ObjectMeta
+}
+
+// MultipartPart describes an uploaded multipart part.
+type MultipartPart struct {
+	PartNumber   int
+	ETag         string
+	Size         int64
+	LastModified time.Time
+}
+
+// CompletedPart identifies a part selected when finalizing an upload.
+type CompletedPart struct {
+	PartNumber int
+	ETag       string
+}
+
 // Sentinel errors
 var (
 	ErrBucketNotFound    = errors.New("bucket not found")
 	ErrBucketExists      = errors.New("bucket already exists")
+	ErrBucketNotEmpty    = errors.New("bucket not empty")
 	ErrObjectNotFound    = errors.New("object not found")
 	ErrInvalidBucketName = errors.New("invalid bucket name")
 	ErrInvalidKey        = errors.New("invalid object key")
+	ErrUploadNotFound    = errors.New("multipart upload not found")
+	ErrInvalidPart       = errors.New("invalid multipart part")
 )
 
 // IsValidBucketName checks if a bucket name is valid according to S3 rules.

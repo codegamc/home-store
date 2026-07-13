@@ -1,0 +1,5 @@
+.git
+bin
+home-store
+test/integration/python/.venv
+test/integration/python/.pytest_cache

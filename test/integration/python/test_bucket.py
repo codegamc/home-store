@@ -84,6 +84,15 @@ class TestHeadBucket:
         assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
 
 
+class TestGetBucketLocation:
+    def test_get_bucket_location(self, s3_client, unique_name, cleanup_buckets):
+        bucket = cleanup_buckets(unique_name("location"))
+        s3_client.create_bucket(Bucket=bucket)
+
+        response = s3_client.get_bucket_location(Bucket=bucket)
+        assert response["LocationConstraint"] == "us-east-1"
+
+
 class TestDeleteBucket:
     """Tests for DeleteBucket operation."""
 

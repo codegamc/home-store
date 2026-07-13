@@ -1,49 +1,41 @@
 package api
 
 import (
-	"math/rand"
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
-	"strconv"
 	"strings"
-	"time"
 
+	"github.com/codegamc/home-store/internal/s3"
 	"github.com/codegamc/home-store/internal/storage"
 )
 
-// requestIDRand is a dedicated random source for request IDs.
-// Not cryptographically secure, but sufficient for request ID generation.
-var requestIDRand = rand.New(rand.NewSource(time.Now().UnixNano()))
-
 // generateRequestID generates a unique request ID for S3 error responses.
 func generateRequestID() string {
-	return strconv.FormatUint(requestIDRand.Uint64(), 16)
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "00000000000000000000000000000000"
+	}
+	return hex.EncodeToString(id[:])
 }
 
 // Handler is the HTTP request handler for the S3 API.
 type Handler struct {
 	backend storage.Backend
-	mux     *http.ServeMux
 }
 
 // NewHandler creates a new API handler.
 func NewHandler(backend storage.Backend) *Handler {
-	h := &Handler{
-		backend: backend,
-		mux:     http.NewServeMux(),
-	}
-	h.setupRoutes()
-	return h
-}
-
-// setupRoutes sets up all HTTP routes.
-func (h *Handler) setupRoutes() {
-	h.mux.HandleFunc("/", h.routeRequest)
+	return &Handler{backend: backend}
 }
 
 // parseBucketKey splits a request path into bucket and object key.
 // Path must have the form /{bucket}/{key...}.
 func parseBucketKey(path string) (bucket, key string) {
 	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
+	if len(parts) == 1 {
+		return parts[0], ""
+	}
 	return parts[0], parts[1]
 }
 
@@ -65,6 +57,23 @@ func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
 	if len(parts) == 1 {
 		// Bucket operations
+		if r.Method == http.MethodGet {
+			switch {
+			case r.URL.Query().Has("location"):
+				h.handleGetBucketLocation(w, r)
+			case r.URL.Query().Has("uploads"):
+				h.handleListMultipartUploads(w, r)
+			case r.URL.Query().Get("list-type") == "2":
+				h.handleListObjectsV2(w, r)
+			default:
+				h.handleListObjects(w, r)
+			}
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Query().Has("delete") {
+			h.handleDeleteObjects(w, r)
+			return
+		}
 		switch r.Method {
 		case http.MethodPut:
 			h.handleCreateBucket(w, r)
@@ -79,6 +88,33 @@ func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Object operations
+	if r.URL.Query().Has("uploadId") {
+		switch r.Method {
+		case http.MethodGet:
+			h.handleListParts(w, r)
+		case http.MethodPut:
+			h.handleUploadPart(w, r)
+		case http.MethodPost:
+			h.handleCompleteMultipartUpload(w, r)
+		case http.MethodDelete:
+			h.handleAbortMultipartUpload(w, r)
+		default:
+			h.errorResponse(w, http.StatusMethodNotAllowed, s3.InvalidRequest, "method not allowed")
+		}
+		return
+	}
+	if r.Method == http.MethodPost && r.URL.Query().Has("uploads") {
+		h.handleCreateMultipartUpload(w, r)
+		return
+	}
+	if r.Method == http.MethodPut && r.URL.Query().Has("renameObject") {
+		h.handleRenameObject(w, r)
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Query().Has("attributes") {
+		h.handleGetObjectAttributes(w, r)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		h.handleGetObject(w, r)
@@ -99,5 +135,7 @@ func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.mux.ServeHTTP(w, r)
+	// Do not use http.ServeMux here: it normalizes paths containing dot
+	// segments, while S3 object keys are opaque and may legally contain them.
+	h.routeRequest(w, r)
 }

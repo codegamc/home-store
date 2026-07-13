@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -157,6 +158,18 @@ func TestHeadBucket(t *testing.T) {
 	})
 }
 
+func TestGetBucketLocation(t *testing.T) {
+	ctx := context.Background()
+	bucketName := generateBucketName("test-location")
+	defer cleanupBucket(ctx, bucketName)
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucketName)})
+	require.NoError(t, err)
+
+	location, err := client.GetBucketLocation(ctx, &s3.GetBucketLocationInput{Bucket: aws.String(bucketName)})
+	require.NoError(t, err)
+	assert.Equal(t, "us-east-1", string(location.LocationConstraint))
+}
+
 // TestDeleteBucket tests bucket deletion.
 func TestDeleteBucket(t *testing.T) {
 	ctx := context.Background()
@@ -199,6 +212,26 @@ func TestDeleteBucket(t *testing.T) {
 			Bucket: aws.String(bucketName),
 		})
 		require.Error(t, err, "bucket should not exist after deletion")
+	})
+
+	t.Run("delete non-empty bucket fails", func(t *testing.T) {
+		bucketName := generateBucketName("test-delete-nonempty")
+		defer cleanupBucket(ctx, bucketName)
+		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucketName)})
+		require.NoError(t, err)
+		_, err = client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucketName), Key: aws.String("object"), Body: strings.NewReader("data"),
+		})
+		require.NoError(t, err)
+
+		_, err = client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucketName)})
+		require.Error(t, err)
+		var apiErr smithy.APIError
+		require.True(t, errors.As(err, &apiErr))
+		assert.Equal(t, "BucketNotEmpty", apiErr.ErrorCode())
+
+		_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucketName), Key: aws.String("object")})
+		require.NoError(t, err)
 	})
 
 	t.Run("deleted bucket not in list", func(t *testing.T) {

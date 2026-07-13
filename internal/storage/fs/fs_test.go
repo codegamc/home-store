@@ -1,7 +1,11 @@
 package fs
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/codegamc/home-store/internal/storage"
@@ -15,6 +19,49 @@ func TestNewBackend(t *testing.T) {
 	}
 	if backend == nil {
 		t.Fatal("backend is nil")
+	}
+}
+
+func TestObjectKeysCannotEscapeDataDirectory(t *testing.T) {
+	basePath := filepath.Join(t.TempDir(), "data")
+	backend, err := NewBackend(basePath)
+	if err != nil {
+		t.Fatalf("NewBackend failed: %v", err)
+	}
+	ctx := context.Background()
+	if err := backend.CreateBucket(ctx, "test-bucket"); err != nil {
+		t.Fatalf("CreateBucket failed: %v", err)
+	}
+
+	key := "../../outside-data-dir"
+	if err := backend.PutObject(ctx, "test-bucket", key, bytes.NewBufferString("safe"), storage.ObjectMeta{}); err != nil {
+		t.Fatalf("PutObject failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(filepath.Dir(basePath), "outside-data-dir")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("object key escaped data directory: stat error = %v", err)
+	}
+	reader, _, err := backend.GetObject(ctx, "test-bucket", key)
+	if err != nil {
+		t.Fatalf("GetObject failed: %v", err)
+	}
+	_ = reader.Close()
+}
+
+func TestDeleteNonEmptyBucketFails(t *testing.T) {
+	backend, err := NewBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewBackend failed: %v", err)
+	}
+	ctx := context.Background()
+	if err := backend.CreateBucket(ctx, "test-bucket"); err != nil {
+		t.Fatalf("CreateBucket failed: %v", err)
+	}
+	if err := backend.PutObject(ctx, "test-bucket", "object", bytes.NewBufferString("data"), storage.ObjectMeta{}); err != nil {
+		t.Fatalf("PutObject failed: %v", err)
+	}
+	if err := backend.DeleteBucket(ctx, "test-bucket"); !errors.Is(err, storage.ErrBucketNotEmpty) {
+		t.Fatalf("DeleteBucket error = %v, want ErrBucketNotEmpty", err)
 	}
 }
 

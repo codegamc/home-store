@@ -7,9 +7,12 @@ import (
 
 // Config holds the server configuration.
 type Config struct {
-	Addr         string
-	DataDir      string
-	LogLevel     string
+	Addr     string
+	DataDir  string
+	LogLevel string
+	// TODO(auth): Signature verification and credential configuration have not
+	// been implemented. Requests are currently accepted regardless of this
+	// setting; do not expose the server outside a strictly trusted network.
 	AuthDisabled bool
 }
 
@@ -21,7 +24,7 @@ func Load() (*Config, error) {
 	flag.StringVar(&cfg.Addr, "addr", getEnv("HOME_STORE_ADDR", "0.0.0.0:9000"), "server address (host:port)")
 	flag.StringVar(&cfg.DataDir, "data-dir", getEnv("HOME_STORE_DATA_DIR", ""), "data directory for objects")
 	flag.StringVar(&cfg.LogLevel, "log-level", getEnv("HOME_STORE_LOG_LEVEL", "info"), "log level (debug, info, warn, error)")
-	flag.BoolVar(&cfg.AuthDisabled, "auth-disabled", false, "disable S3 signature verification")
+	flag.BoolVar(&cfg.AuthDisabled, "auth-disabled", false, "disable S3 signature verification (not yet implemented)")
 
 	flag.Parse()
 

@@ -30,6 +30,7 @@ The bucket integration tests use the AWS SDK for Go v2 as the client to validate
 - **ListBuckets**: Tests listing all buckets and verifying created buckets appear in the list
 - **HeadBucket**: Tests checking bucket existence (both existing and non-existent buckets)
 - **DeleteBucket**: Tests successful deletion, deleting non-existent buckets, and verifying buckets are removed from listings
+- **GetBucketLocation**: Tests the configured S3 region response
 - **BucketCRUDWorkflow**: End-to-end test of the complete bucket lifecycle
 - **BucketNameValidation**: Comprehensive validation of bucket naming rules
 
@@ -40,7 +41,10 @@ The bucket integration tests use the AWS SDK for Go v2 as the client to validate
 - **HeadObject**: Tests object metadata retrieval, including nonexistent key error
 - **DeleteObject**: Tests object deletion and verification
 - **CopyObject**: Tests copying objects between keys
-- **ListObjectsV2**: Tests object listing (planned, currently skipped)
+- **ListObjects / ListObjectsV2**: Tests prefix and delimiter object listings
+- **DeleteObjects**: Tests batch deletion, including idempotent deletion of missing keys
+- **GetObjectAttributes**: Tests ETag, size, and storage class metadata
+- **RenameObject**: Tests the S3 RenameObject request form
 
 ### Python — Bucket Operations (`python/test_bucket.py`)
 
@@ -61,6 +65,8 @@ The Python integration tests use boto3 to validate S3-compatible bucket operatio
 - **DeleteObject**: Tests object deletion and verification
 - **CopyObject**: Tests copying objects between keys
 - **ObjectWorkflow**: End-to-end test of the complete object lifecycle
+- **ListingAndBatchDelete**: Tests ListObjectsV2 and DeleteObjects
+- **MultipartUpload**: Tests create, upload, list parts, complete, abort, and UploadPartCopy
 
 ### Test Infrastructure
 

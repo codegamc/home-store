@@ -37,7 +37,7 @@ func (h *Handler) handleListBuckets(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	_ = xml.NewEncoder(w).Encode(resp)
 }
 
@@ -81,9 +81,12 @@ func (h *Handler) handleDeleteBucket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.backend.DeleteBucket(r.Context(), bucket); err != nil {
-		if err == storage.ErrBucketNotFound {
+		switch err {
+		case storage.ErrBucketNotFound:
 			h.errorResponse(w, http.StatusNotFound, s3.NoSuchBucket, "bucket does not exist")
-		} else {
+		case storage.ErrBucketNotEmpty:
+			h.errorResponse(w, http.StatusConflict, s3.BucketNotEmpty, "the bucket you tried to delete is not empty")
+		default:
 			h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to delete bucket")
 		}
 		return
@@ -136,6 +139,6 @@ func (h *Handler) errorResponseWithResource(w http.ResponseWriter, statusCode in
 		RequestID: generateRequestID(),
 	}
 
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	_ = xml.NewEncoder(w).Encode(resp)
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/codegamc/home-store/internal/storage"
 )
@@ -24,7 +25,7 @@ func NewFSMetadataStore(basePath string) (*FSMetadataStore, error) {
 
 // metadataPath returns the path to the metadata file for an object.
 func (f *FSMetadataStore) metadataPath(bucket, key string) string {
-	return filepath.Join(f.basePath, bucket, ".metadata", key+".json")
+	return filepath.Join(f.basePath, bucket, ".metadata", objectFileName(key)+".json")
 }
 
 // PutMetadata stores metadata for an object.
@@ -109,6 +110,9 @@ func (f *FSMetadataStore) ListMetadata(ctx context.Context, bucket, prefix strin
 		var meta storage.ObjectMeta
 		if err := json.Unmarshal(data, &meta); err != nil {
 			continue // Skip files that can't be unmarshaled
+		}
+		if !strings.HasPrefix(meta.Key, prefix) {
+			continue
 		}
 
 		results = append(results, meta)

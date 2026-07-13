@@ -2,6 +2,8 @@ package fs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -34,6 +36,15 @@ func (f *FSBackend) bucketPath(name string) string {
 	return filepath.Join(f.basePath, name)
 }
 
+func objectFileName(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
+
+func (f *FSBackend) objectsPath(bucket string) string {
+	return filepath.Join(f.bucketPath(bucket), ".objects")
+}
+
 // NewBackend creates a new filesystem backend with the given base path.
 func NewBackend(basePath string) (*FSBackend, error) {
 	if err := os.MkdirAll(basePath, 0755); err != nil {
@@ -51,6 +62,9 @@ func NewBackend(basePath string) (*FSBackend, error) {
 
 // CreateBucket creates a new bucket.
 func (f *FSBackend) CreateBucket(ctx context.Context, name string) error {
+	if !storage.IsValidBucketName(name) {
+		return storage.ErrInvalidBucketName
+	}
 	bucketPath := f.bucketPath(name)
 	metaPath := f.bucketMetadataPath(name)
 
@@ -100,7 +114,15 @@ func (f *FSBackend) DeleteBucket(ctx context.Context, name string) error {
 		return fmt.Errorf("failed to check bucket existence: %w", err)
 	}
 
-	// Remove entire bucket directory
+	entries, err := os.ReadDir(f.objectsPath(name))
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to inspect bucket contents: %w", err)
+	}
+	if len(entries) > 0 {
+		return storage.ErrBucketNotEmpty
+	}
+
+	// Remove the empty bucket directory.
 	if err := os.RemoveAll(bucketPath); err != nil {
 		return fmt.Errorf("failed to delete bucket: %w", err)
 	}
@@ -158,4 +180,21 @@ func (f *FSBackend) BucketExists(ctx context.Context, name string) (bool, error)
 		return false, nil
 	}
 	return false, fmt.Errorf("failed to check bucket existence: %w", err)
+}
+
+// GetBucketLocation returns the configured region for a bucket.
+func (f *FSBackend) GetBucketLocation(ctx context.Context, name string) (string, error) {
+	data, err := os.ReadFile(f.bucketMetadataPath(name))
+	if os.IsNotExist(err) {
+		return "", storage.ErrBucketNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to read bucket metadata: %w", err)
+	}
+
+	var meta bucketMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", fmt.Errorf("failed to read bucket metadata: %w", err)
+	}
+	return meta.Region, nil
 }

@@ -22,6 +22,9 @@ func (m *mockBackend) DeleteBucket(ctx context.Context, name string) error { ret
 func (m *mockBackend) BucketExists(ctx context.Context, name string) (bool, error) {
 	return false, nil
 }
+func (m *mockBackend) GetBucketLocation(ctx context.Context, name string) (string, error) {
+	return "us-east-1", nil
+}
 func (m *mockBackend) ListBuckets(ctx context.Context) ([]storage.BucketInfo, error) {
 	return nil, nil
 }
@@ -37,6 +40,30 @@ func (m *mockBackend) HeadObject(ctx context.Context, bucket, key string) (stora
 }
 func (m *mockBackend) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) (storage.ObjectMeta, error) {
 	return storage.ObjectMeta{}, nil
+}
+func (m *mockBackend) RenameObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) (storage.ObjectMeta, error) {
+	return storage.ObjectMeta{}, nil
+}
+func (m *mockBackend) ListObjects(ctx context.Context, bucket string, options storage.ListOptions) (storage.ListResult, error) {
+	return storage.ListResult{}, nil
+}
+func (m *mockBackend) CreateMultipartUpload(ctx context.Context, bucket, key string, meta storage.ObjectMeta) (storage.MultipartUpload, error) {
+	return storage.MultipartUpload{}, nil
+}
+func (m *mockBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, body io.Reader) (storage.MultipartPart, error) {
+	return storage.MultipartPart{}, nil
+}
+func (m *mockBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.CompletedPart) (storage.ObjectMeta, error) {
+	return storage.ObjectMeta{}, nil
+}
+func (m *mockBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	return nil
+}
+func (m *mockBackend) ListMultipartUploads(ctx context.Context, bucket string) ([]storage.MultipartUpload, error) {
+	return nil, nil
+}
+func (m *mockBackend) ListParts(ctx context.Context, bucket, key, uploadID string) ([]storage.MultipartPart, error) {
+	return nil, nil
 }
 
 func TestNewHandler(t *testing.T) {
@@ -80,6 +107,12 @@ func (m *mockBackendWithBuckets) BucketExists(ctx context.Context, name string) 
 	_, exists := m.buckets[name]
 	return exists, nil
 }
+func (m *mockBackendWithBuckets) GetBucketLocation(ctx context.Context, name string) (string, error) {
+	if _, exists := m.buckets[name]; !exists {
+		return "", storage.ErrBucketNotFound
+	}
+	return "us-east-1", nil
+}
 func (m *mockBackendWithBuckets) PutObject(ctx context.Context, bucket, key string, body io.Reader, meta storage.ObjectMeta) error {
 	return nil
 }
@@ -94,6 +127,33 @@ func (m *mockBackendWithBuckets) HeadObject(ctx context.Context, bucket, key str
 }
 func (m *mockBackendWithBuckets) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) (storage.ObjectMeta, error) {
 	return storage.ObjectMeta{}, nil
+}
+func (m *mockBackendWithBuckets) RenameObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string) (storage.ObjectMeta, error) {
+	return storage.ObjectMeta{}, nil
+}
+func (m *mockBackendWithBuckets) ListObjects(ctx context.Context, bucket string, options storage.ListOptions) (storage.ListResult, error) {
+	if _, exists := m.buckets[bucket]; !exists {
+		return storage.ListResult{}, storage.ErrBucketNotFound
+	}
+	return storage.ListResult{}, nil
+}
+func (m *mockBackendWithBuckets) CreateMultipartUpload(ctx context.Context, bucket, key string, meta storage.ObjectMeta) (storage.MultipartUpload, error) {
+	return storage.MultipartUpload{}, nil
+}
+func (m *mockBackendWithBuckets) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, body io.Reader) (storage.MultipartPart, error) {
+	return storage.MultipartPart{}, nil
+}
+func (m *mockBackendWithBuckets) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.CompletedPart) (storage.ObjectMeta, error) {
+	return storage.ObjectMeta{}, nil
+}
+func (m *mockBackendWithBuckets) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	return nil
+}
+func (m *mockBackendWithBuckets) ListMultipartUploads(ctx context.Context, bucket string) ([]storage.MultipartUpload, error) {
+	return nil, nil
+}
+func (m *mockBackendWithBuckets) ListParts(ctx context.Context, bucket, key, uploadID string) ([]storage.MultipartPart, error) {
+	return nil, nil
 }
 
 func TestListBuckets(t *testing.T) {

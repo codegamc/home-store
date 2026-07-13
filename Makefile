@@ -24,11 +24,11 @@ integration-test: build
 
 .PHONY: lint
 lint:
-	golangci-lint run ./...
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4 run ./...
 
 .PHONY: docker
 docker:
-	docker build -t home-store:dev -f docker/Dockerfile .
+	docker build -t home-store:dev .
 
 .PHONY: fmt
 fmt:
