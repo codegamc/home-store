@@ -1,103 +1,229 @@
 package api
 
 import (
-	"math/rand"
+	cryptorand "crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"net/http"
-	"strconv"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/codegamc/home-store/internal/s3"
 	"github.com/codegamc/home-store/internal/storage"
 )
 
-// requestIDRand is a dedicated random source for request IDs.
-// Not cryptographically secure, but sufficient for request ID generation.
-var requestIDRand = rand.New(rand.NewSource(time.Now().UnixNano()))
-
-// generateRequestID generates a unique request ID for S3 error responses.
 func generateRequestID() string {
-	return strconv.FormatUint(requestIDRand.Uint64(), 16)
+	value := make([]byte, 16)
+	if _, err := cryptorand.Read(value); err != nil {
+		// Fallback to time-based ID instead of constant to avoid collisions
+		return hex.EncodeToString([]byte(fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())))[:32]
+	}
+	return hex.EncodeToString(value)
 }
 
-// Handler is the HTTP request handler for the S3 API.
 type Handler struct {
 	backend storage.Backend
-	mux     *http.ServeMux
 }
 
-// NewHandler creates a new API handler.
 func NewHandler(backend storage.Backend) *Handler {
-	h := &Handler{
-		backend: backend,
-		mux:     http.NewServeMux(),
-	}
-	h.setupRoutes()
-	return h
+	return &Handler{backend: backend}
 }
 
-// setupRoutes sets up all HTTP routes.
-func (h *Handler) setupRoutes() {
-	h.mux.HandleFunc("/", h.routeRequest)
-}
-
-// parseBucketKey splits a request path into bucket and object key.
-// Path must have the form /{bucket}/{key...}.
 func parseBucketKey(path string) (bucket, key string) {
-	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
-	return parts[0], parts[1]
+	trimmed := strings.TrimLeft(path, "/")
+	if trimmed == "" {
+		return "", ""
+	}
+	parts := strings.SplitN(trimmed, "/", 2)
+	bucket = parts[0]
+	if len(parts) == 2 {
+		key = parts[1]
+	}
+	return bucket, key
 }
 
-// routeRequest dispatches requests to appropriate handlers.
 func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-
-	// Root path - list buckets
-	if path == "/" {
+	if r.URL.Path == "/health/live" || r.URL.Path == "/health/ready" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+		return
+	}
+	if r.URL.Path == "/" {
 		if r.Method == http.MethodGet {
 			h.handleListBuckets(w, r)
 			return
 		}
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		h.methodNotAllowed(w, r)
 		return
 	}
 
-	// Determine if this is a bucket-only path (/{bucket}) or an object path (/{bucket}/{key}).
-	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
-	if len(parts) == 1 {
-		// Bucket operations
+	bucket, key := parseBucketKey(r.URL.Path)
+	if bucket == "" {
+		h.errorResponse(w, http.StatusBadRequest, s3.InvalidRequest, "bucket name is required")
+		return
+	}
+	query := r.URL.Query()
+	if key == "" && !strings.Contains(strings.TrimPrefix(r.URL.Path, "/"), "/") {
 		switch r.Method {
 		case http.MethodPut:
+			if hasUnsupportedQuery(query) {
+				h.notImplemented(w, r)
+				return
+			}
 			h.handleCreateBucket(w, r)
 		case http.MethodDelete:
+			if hasUnsupportedQuery(query) {
+				h.notImplemented(w, r)
+				return
+			}
 			h.handleDeleteBucket(w, r)
 		case http.MethodHead:
+			if hasUnsupportedQuery(query) {
+				h.notImplemented(w, r)
+				return
+			}
 			h.handleHeadBucket(w, r)
+		case http.MethodGet:
+			if query.Has("location") {
+				if hasUnsupportedQuery(query, "location") {
+					h.notImplemented(w, r)
+					return
+				}
+				h.handleGetBucketLocation(w, r)
+			} else if query.Has("uploads") {
+				if hasUnsupportedQuery(query, "uploads", "prefix", "delimiter", "key-marker", "upload-id-marker", "max-uploads", "encoding-type") {
+					h.notImplemented(w, r)
+					return
+				}
+				h.handleListMultipartUploads(w, r)
+			} else if hasUnsupportedQuery(query, "list-type", "prefix", "delimiter", "marker", "max-keys", "encoding-type", "continuation-token", "start-after", "fetch-owner") {
+				h.notImplemented(w, r)
+			} else {
+				h.handleListObjects(w, r, query.Get("list-type") == "2")
+			}
+		case http.MethodPost:
+			if query.Has("delete") {
+				if hasUnsupportedQuery(query, "delete") {
+					h.notImplemented(w, r)
+					return
+				}
+				h.handleDeleteObjects(w, r)
+			} else {
+				h.notImplemented(w, r)
+			}
 		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			h.methodNotAllowed(w, r)
 		}
 		return
 	}
 
-	// Object operations
+	if !storage.IsValidObjectKey(key) {
+		h.errorResponseWithResource(w, http.StatusBadRequest, s3.InvalidRequest, "object key must contain between 1 and 1024 UTF-8 bytes", r.URL.Path)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		h.handleGetObject(w, r)
+		if query.Get("uploadId") != "" {
+			if hasUnsupportedQuery(query, "uploadId", "part-number-marker", "max-parts", "encoding-type") {
+				h.notImplemented(w, r)
+				return
+			}
+			h.handleListParts(w, r)
+		} else if hasUnsupportedQuery(query) {
+			h.notImplemented(w, r)
+		} else {
+			h.handleGetObject(w, r)
+		}
 	case http.MethodPut:
-		if r.Header.Get("x-amz-copy-source") != "" {
+		if query.Get("uploadId") != "" && query.Get("partNumber") != "" {
+			if hasUnsupportedQuery(query, "uploadId", "partNumber") {
+				h.notImplemented(w, r)
+				return
+			}
+			h.handleUploadPart(w, r)
+		} else if r.Header.Get("x-amz-copy-source") != "" {
+			if hasUnsupportedQuery(query) {
+				h.notImplemented(w, r)
+				return
+			}
 			h.handleCopyObject(w, r)
 		} else {
+			if hasUnsupportedQuery(query) {
+				h.notImplemented(w, r)
+				return
+			}
 			h.handlePutObject(w, r)
 		}
+	case http.MethodPost:
+		if query.Has("uploads") {
+			if hasUnsupportedQuery(query, "uploads") {
+				h.notImplemented(w, r)
+				return
+			}
+			h.handleCreateMultipartUpload(w, r)
+		} else if query.Get("uploadId") != "" {
+			if hasUnsupportedQuery(query, "uploadId") {
+				h.notImplemented(w, r)
+				return
+			}
+			h.handleCompleteMultipartUpload(w, r)
+		} else {
+			h.notImplemented(w, r)
+		}
 	case http.MethodDelete:
-		h.handleDeleteObject(w, r)
+		if query.Get("uploadId") != "" {
+			if hasUnsupportedQuery(query, "uploadId") {
+				h.notImplemented(w, r)
+				return
+			}
+			h.handleAbortMultipartUpload(w, r)
+		} else {
+			if hasUnsupportedQuery(query) {
+				h.notImplemented(w, r)
+				return
+			}
+			h.handleDeleteObject(w, r)
+		}
 	case http.MethodHead:
+		if hasUnsupportedQuery(query) {
+			h.notImplemented(w, r)
+			return
+		}
 		h.handleHeadObject(w, r)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		h.methodNotAllowed(w, r)
 	}
 }
 
-// ServeHTTP implements http.Handler.
+func hasUnsupportedQuery(query url.Values, allowed ...string) bool {
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, value := range allowed {
+		allowedSet[strings.ToLower(value)] = true
+	}
+	for name := range query {
+		lower := strings.ToLower(name)
+		if strings.HasPrefix(lower, "x-amz-") || lower == "x-id" {
+			continue
+		}
+		if !allowedSet[lower] {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.mux.ServeHTTP(w, r)
+	w.Header().Set("x-amz-request-id", generateRequestID())
+	h.routeRequest(w, r)
+}
+
+func (h *Handler) methodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	h.errorResponseWithResource(w, http.StatusMethodNotAllowed, s3.MethodNotAllowed, "the specified method is not allowed against this resource", r.URL.Path)
+}
+
+func (h *Handler) notImplemented(w http.ResponseWriter, r *http.Request) {
+	h.errorResponseWithResource(w, http.StatusNotImplemented, s3.NotImplemented, "the requested S3 operation is not implemented", r.URL.Path)
 }

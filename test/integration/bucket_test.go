@@ -7,10 +7,22 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func readBucketRegion(t *testing.T, bucket string) string {
+	t.Helper()
+	output, err := client.GetBucketLocation(context.Background(), &s3.GetBucketLocationInput{Bucket: aws.String(bucket)})
+	require.NoError(t, err)
+	region := string(output.LocationConstraint)
+	if region == "" {
+		region = "us-east-1"
+	}
+	return region
+}
 
 // TestCreateBucket tests bucket creation.
 func TestCreateBucket(t *testing.T) {
@@ -71,6 +83,31 @@ func TestCreateBucket(t *testing.T) {
 				assert.Error(t, err, "should fail for invalid bucket name: %s", name)
 			})
 		}
+	})
+
+	t.Run("create bucket uses default location when request omits one", func(t *testing.T) {
+		bucketName := generateBucketName("test-default-location")
+		defer cleanupBucket(ctx, bucketName)
+
+		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+			Bucket: aws.String(bucketName),
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "us-east-1", readBucketRegion(t, bucketName))
+	})
+
+	t.Run("create bucket uses API location override when provided", func(t *testing.T) {
+		bucketName := generateBucketName("test-override-location")
+		defer cleanupBucket(ctx, bucketName)
+
+		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+			Bucket: aws.String(bucketName),
+			CreateBucketConfiguration: &s3types.CreateBucketConfiguration{
+				LocationConstraint: s3types.BucketLocationConstraintEuWest1,
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "eu-west-1", readBucketRegion(t, bucketName))
 	})
 }
 

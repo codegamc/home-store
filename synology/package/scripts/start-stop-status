@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+PACKAGE="home-store"
+VAR="/var/packages/$PACKAGE/var"
+TARGET="/var/packages/$PACKAGE/target"
+PIDFILE="$VAR/home-store.pid"
+LOGFILE="$VAR/home-store.log"
+CONFIG="$VAR/config.env"
+
+load_config() {
+    test -f "$CONFIG" && . "$CONFIG"
+    : "${HOME_STORE_ADDR:=0.0.0.0:9000}"
+    : "${HOME_STORE_DATA_DIR:=$VAR/state/data}"
+    : "${HOME_STORE_DB_PATH:=$VAR/state/metadata.sqlite}"
+    export HOME_STORE_ADDR HOME_STORE_DATA_DIR HOME_STORE_DB_PATH
+}
+
+case "${1:-}" in
+    start)
+        load_config
+        mkdir -p "$HOME_STORE_DATA_DIR" "$(dirname "$HOME_STORE_DB_PATH")"
+        "$TARGET/bin/home-store" >>"$LOGFILE" 2>&1 &
+        echo $! > "$PIDFILE"
+        ;;
+    stop)
+        if test -f "$PIDFILE"; then
+            kill -TERM "$(cat "$PIDFILE")" 2>/dev/null || true
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                kill -0 "$(cat "$PIDFILE")" 2>/dev/null || break
+                sleep 1
+            done
+            rm -f "$PIDFILE"
+        fi
+        ;;
+    status)
+        test -f "$PIDFILE" && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+        ;;
+    *)
+        echo "usage: $0 start|stop|status" >&2
+        exit 2
+        ;;
+esac

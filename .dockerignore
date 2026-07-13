@@ -1,0 +1,10 @@
+.git
+.github
+.claude
+.vscode
+bin
+/home-store
+test
+synology
+*.sqlite
+*.log

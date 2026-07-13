@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+VAR="/var/packages/home-store/var"
+mkdir -p "$VAR/state/data"
+if ! test -f "$VAR/config.env"; then
+    SECRET=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+    cat > "$VAR/config.env" <<EOF
+HOME_STORE_ACCESS_KEY=homestore
+HOME_STORE_SECRET_KEY=$SECRET
+HOME_STORE_ADDR=0.0.0.0:9000
+HOME_STORE_DATA_DIR=$VAR/state/data
+HOME_STORE_DB_PATH=$VAR/state/metadata.sqlite
+HOME_STORE_LOG_LEVEL=info
+EOF
+    chmod 0600 "$VAR/config.env"
+fi
+exit 0

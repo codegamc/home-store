@@ -34,6 +34,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "Failed to find or build binary: %v\n", err)
 		os.Exit(1)
 	}
+	builtBinary := os.Getenv("HOME_STORE_BIN") == ""
 
 	// Create a temp data directory
 	dataDir, err = os.MkdirTemp("", "home-store-integration-*")
@@ -41,7 +42,6 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "Failed to create temp data directory: %v\n", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(dataDir)
 
 	// Find an available port
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -56,6 +56,10 @@ func TestMain(m *testing.M) {
 
 	// Start the server
 	serverCmd = exec.Command(binPath, "-addr", serverAddr, "-data-dir", dataDir)
+	serverCmd.Env = append(os.Environ(),
+		"HOME_STORE_ACCESS_KEY=test-access-key",
+		"HOME_STORE_SECRET_KEY=test-secret-key",
+	)
 	serverCmd.Stdout = os.Stdout
 	serverCmd.Stderr = os.Stderr
 	if err := serverCmd.Start(); err != nil {
@@ -83,8 +87,15 @@ func TestMain(m *testing.M) {
 
 	// Shut down the server
 	if serverCmd.Process != nil {
-		serverCmd.Process.Signal(os.Interrupt)
-		serverCmd.Wait()
+		_ = serverCmd.Process.Signal(os.Interrupt)
+		if err := serverCmd.Wait(); err != nil && code == 0 {
+			fmt.Fprintf(os.Stderr, "Server did not shut down cleanly: %v\n", err)
+			code = 1
+		}
+	}
+	_ = os.RemoveAll(dataDir)
+	if builtBinary {
+		_ = os.RemoveAll(filepath.Dir(binPath))
 	}
 
 	os.Exit(code)
@@ -99,18 +110,17 @@ func findOrBuildBinary() (string, error) {
 		}
 	}
 
-	// Try to find binary in ../bin/
 	workspaceRoot := findWorkspaceRoot()
-	binPath := filepath.Join(workspaceRoot, "bin", "home-store")
-	if _, err := os.Stat(binPath); err == nil {
-		return binPath, nil
+	buildDir, err := os.MkdirTemp("", "home-store-integration-bin-*")
+	if err != nil {
+		return "", err
 	}
-
-	// Build the binary
+	binPath := filepath.Join(buildDir, "home-store")
 	fmt.Println("Building home-store binary...")
 	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/home-store")
 	cmd.Dir = workspaceRoot
 	if output, err := cmd.CombinedOutput(); err != nil {
+		os.RemoveAll(buildDir)
 		return "", fmt.Errorf("failed to build binary: %w\nOutput: %s", err, output)
 	}
 
@@ -211,8 +221,19 @@ func cleanupBucket(ctx context.Context, bucketName string) {
 	if client == nil {
 		return
 	}
-	// Try to delete the bucket, ignore errors
-	client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+	for {
+		output, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucketName)})
+		if err != nil {
+			break
+		}
+		for _, object := range output.Contents {
+			_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucketName), Key: object.Key})
+		}
+		if !aws.ToBool(output.IsTruncated) {
+			break
+		}
+	}
+	_, _ = client.DeleteBucket(ctx, &s3.DeleteBucketInput{
 		Bucket: aws.String(bucketName),
 	})
 }

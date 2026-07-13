@@ -1,6 +1,15 @@
 # Binaries
 bin/
+/home-store
+dist/
+home-store-secret.txt
+*.sqlite
+*.sqlite-lock
+*.sqlite.lock
+synology/package/package/bin/
 
 # Workspace
 .vscode/
 test/integration/python/__pycache__/*.pyc
+test/integration/python/.venv/
+test/integration/python/.pytest_cache/

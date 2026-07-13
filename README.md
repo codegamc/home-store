@@ -1,183 +1,148 @@
 # Home Store
 
-Home Store is an "object storage" server designed for home-lab use. It is tested to be compatible with the AWS S3 API.
+Home Store is a single-node S3-compatible object storage server for a NAS or
+home lab. It is deliberately boring: payload durability belongs to the NAS,
+filesystem, RAID, and snapshot system; Home Store provides the S3 protocol,
+atomic object publication, metadata, and safe recovery after interruption.
 
-## Goals
+It supports path-style S3 clients including the AWS SDK for Go v2 and boto3.
+Virtual-host addressing, IAM policies, ACLs, versioning, replication, and other
+enterprise control-plane features are intentionally out of scope.
 
-The goal of this server is for easy and effortless deployment of a correct object storage API for users to self-host on "Home Lab" servers on their LAN. This means that some of decisions made for this may not match "production" servers that would be used in a commercial context, but make it easier and lower-maintainence for an individual. The representative user of this is an individual who would want to run an object storage API on their NAS, maybe alongside NFS, so they can self host software that depends on object storage. For this user, it may sit idle for hours, and the software that calls it may not experience a sustained load. It will store data for a household. 
+## Quick start with Docker Compose
 
-* Perfect compliance with the Go, Python AWS Client Libraries, for implemented APIs
+Create a secret and start the service:
 
-## Non-Goals
+```sh
+openssl rand -hex 32 > home-store-secret.txt
+chmod 600 home-store-secret.txt
+docker compose up -d
+```
 
-This software is not designed to be run in a commercial setting. While it strives for correctness and data integrity, it may make implementation tradeoffs aimed at it's core goal that are sub-optimal for commercial settings, such as around limitations around supported load or scalability.
+The included Compose file publishes the API on `http://localhost:9000`, uses
+access key `homestore`, reads the secret through a Docker secret, and keeps the
+object data and SQLite database in one durable volume.
 
-* It is currently not planned to support "virtual host" style addressing, only path-style. 
-* Running in non-trusted networking environments (eg. open internet)
+Configure the AWS CLI for path-style access:
 
-## Running
+```sh
+aws configure set aws_access_key_id homestore --profile home-store
+aws configure set aws_secret_access_key "$(cat home-store-secret.txt)" --profile home-store
+aws configure set region us-east-1 --profile home-store
+aws configure set s3.addressing_style path --profile home-store
 
-TODO - The goal is to support a simple binary, docker, and synology package
+aws --profile home-store --endpoint-url http://localhost:9000 s3api create-bucket --bucket photos
+aws --profile home-store --endpoint-url http://localhost:9000 s3 cp picture.jpg s3://photos/
+```
 
-## Backing Data
+HTTP is appropriate only on a trusted LAN. Put Home Store behind a TLS reverse
+proxy before routing traffic across an untrusted network.
 
-TODO - Currently, locally on file system, goal also to support NFS...?
+## Native binary
 
-## API Coverage
+```sh
+HOME_STORE_DATA_DIR=/srv/home-store/data \
+HOME_STORE_DB_PATH=/srv/home-store/metadata.sqlite \
+HOME_STORE_ACCESS_KEY=homestore \
+HOME_STORE_SECRET_KEY_FILE=/run/secrets/home-store \
+./home-store
+```
 
-Here is the status and coverage of core object storage APIs...
+Configuration is available through flags or environment variables. Secrets
+are intentionally not accepted as command-line flags.
 
-#### Tested Libraries
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `HOME_STORE_ADDR` | `0.0.0.0:9000` | Listen address |
+| `HOME_STORE_DATA_DIR` | required | Object blob directory |
+| `HOME_STORE_DB_PATH` | sibling of data directory | SQLite metadata database |
+| `HOME_STORE_LOCATION` | `us-east-1` | Default bucket region |
+| `HOME_STORE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
+| `HOME_STORE_ACCESS_KEY` | required | Single owner access key |
+| `HOME_STORE_SECRET_KEY` | required unless secret file is used | Single owner secret |
+| `HOME_STORE_SECRET_KEY_FILE` | empty | File containing the owner secret |
+| `HOME_STORE_AUTH_DISABLED` | `false` | Explicit trusted-test bypass |
 
-| Library | Package | Tested |
-|---------|---------|--------|
-| Go AWS SDK v2 | `github.com/aws/aws-sdk-go-v2/service/s3` | ✅ |
-| Python boto3 | `boto3` | ✅ |
+`GET /health/live` and `GET /health/ready` are unauthenticated health checks.
+All S3 endpoints require AWS Signature Version 4 by default, including header
+signatures and presigned URLs.
 
-#### Bucket Operations
+## Data layout and recovery
 
-| API Operation | Status | Go AWS SDK v2 | Python boto3 |
-|---------------|--------|---------------|--------------|
-| ListBuckets | Done | ✅ | ✅ |
-| CreateBucket | Done | ✅ | ✅ |
-| DeleteBucket | Done | ✅ | ✅ |
-| HeadBucket | Done | ✅ | ✅ |
-| GetBucketLocation | Planned | ❌ | ❌ |
+Payloads are immutable opaque blobs under
+`HOME_STORE_DATA_DIR/.home-store/blobs`. SQLite maps bucket/key pairs to those
+blobs and stores object metadata and multipart state. Keys are never interpreted
+as filesystem paths, so keys such as `a`, `a/b`, `../x`, repeated slashes, and
+Unicode names can coexist safely.
 
-#### Object Operations
+Only one Home Store process may open a store at a time. Startup takes an
+exclusive lock, completes legacy JSON/direct-path migrations, and removes
+unreferenced temporary blobs. Writes publish a synced blob before committing
+its SQLite reference; an interrupted write therefore leaves either the old
+object or the complete new object, never partial visible bytes.
 
-| Operation | Status | Go AWS SDK v2 | Python boto3 |
-|-----------|--------|---------------|--------------|
-| PutObject | Done | ✅ | ✅ |
-| GetObject | Done | ✅ | ✅ |
-| DeleteObject | Done | ✅ | ✅ |
-| DeleteObjects | Planned | ❌ | ❌ |
-| HeadObject | Done | ✅ | ✅ |
-| CopyObject | Done | ✅ | ✅ |
-| ListObjects | Planned | ❌ | ❌ |
-| ListObjectsV2 | Planned | ❌ | ❌ |
-| GetObjectAttributes | Planned | ❌ | ❌ |
-| RenameObject | Planned | ❌ | ❌ |
+The data directory and SQLite database are one logical state. Keep both under
+the same durable Docker volume or NAS shared folder. For a backup or restore,
+stop Home Store, snapshot/copy both together, then restart it. Home Store does
+not implement backup scheduling, RAID, replication, scrubbing, or erasure
+coding.
 
-#### Multi-Part Operations
+## Supported S3 surface
 
-| Operation | Status | Go AWS SDK v2 | Python boto3 |
-|-----------|--------|---------------|--------------|
-| AbortMultipartUpload | Planned | ❌ | ❌ |
-| CompleteMultipartUpload | Planned | ❌ | ❌ |
-| CreateMultipartUpload | Planned | ❌ | ❌ |
-| ListMultipartUploads | Planned | ❌ | ❌ |
-| ListParts | Planned | ❌ | ❌ |
-| UploadPart | Planned | ❌ | ❌ |
-| UploadPartCopy | Planned | ❌ | ❌ |
+Bucket APIs:
 
+- ListBuckets
+- CreateBucket
+- HeadBucket, including `x-amz-bucket-region`
+- GetBucketLocation
+- DeleteBucket, with `BucketNotEmpty` protection
 
+Object APIs:
 
-#### Not Planned Operations
+- PutObject, GetObject, HeadObject, DeleteObject, and CopyObject
+- ListObjects and ListObjectsV2 with prefix, delimiter, and pagination
+- DeleteObjects
+- Range GETs and standard conditional reads
+- Atomic `If-Match` and `If-None-Match` conditional writes
+- User metadata and common HTTP object metadata
+- Content-MD5, SHA-256 payload, CRC32, CRC32C, SHA-1, and SHA-256 request checks
 
-*This list of operations came from the public AWS website. There is no plan to implement any of them here*
+Multipart APIs:
 
-| Operation | Status |
-|-----------|--------|
-| CreateBucketMetadataConfiguration | Not Planned |
-| CreateBucketMetadataTableConfiguration | Not Planned |
-| DeleteBucketAnalyticsConfiguration | Not Planned |
-| DeleteBucketCors | Not Planned |
-| DeleteBucketEncryption | Not Planned |
-| DeleteBucketIntelligentTieringConfiguration | Not Planned |
-| DeleteBucketInventoryConfiguration | Not Planned |
-| DeleteBucketLifecycle | Not Planned |
-| DeleteBucketMetadataConfiguration | Not Planned |
-| DeleteBucketMetricsConfiguration | Not Planned |
-| DeleteBucketOwnershipControls | Not Planned |
-| DeleteBucketPolicy | Not Planned |
-| DeleteBucketReplication | Not Planned |
-| DeleteBucketTagging | Not Planned |
-| DeleteBucketWebsite | Not Planned |
-| DeleteObjectTagging | Not Planned |
-| DeletePublicAccessBlock | Not Planned |
-| GetBucketAbac | Not Planned |
-| GetBucketAccelerateConfiguration | Not Planned |
-| GetBucketAcl | Not Planned |
-| GetBucketAnalyticsConfiguration | Not Planned |
-| GetBucketCors | Not Planned |
-| GetBucketEncryption | Not Planned |
-| GetBucketIntelligentTieringConfiguration | Not Planned |
-| GetBucketInventoryConfiguration | Not Planned |
-| GetBucketLifecycle | Not Planned |
-| GetBucketLifecycleConfiguration | Not Planned |
-| GetBucketLogging | Not Planned |
-| GetBucketMetadataConfiguration | Not Planned |
-| GetBucketMetadataTableConfiguration | Not Planned |
-| GetBucketMetricsConfiguration | Not Planned |
-| GetBucketNotification | Not Planned |
-| GetBucketNotificationConfiguration | Not Planned |
-| GetBucketOwnershipControls | Not Planned |
-| GetBucketPolicy | Not Planned |
-| GetBucketPolicyStatus | Not Planned |
-| GetBucketReplication | Not Planned |
-| GetBucketRequestPayment | Not Planned |
-| GetBucketTagging | Not Planned |
-| GetBucketVersioning | Not Planned |
-| GetBucketWebsite | Not Planned |
-| GetObjectAcl | Not Planned |
-| GetObjectLegalHold | Not Planned |
-| GetObjectLockConfiguration | Not Planned |
-| GetObjectRetention | Not Planned |
-| GetObjectTagging | Not Planned |
-| GetObjectTorrent | Not Planned |
-| GetPublicAccessBlock | Not Planned |
-| ListBucketAnalyticsConfigurations | Not Planned |
-| ListBucketIntelligentTieringConfigurations | Not Planned |
-| ListBucketInventoryConfigurations | Not Planned |
-| ListBucketMetricsConfigurations | Not Planned |
-| ListObjectVersions | Not Planned |
-| PutBucketAbac | Not Planned |
-| PutBucketAccelerateConfiguration | Not Planned |
-| PutBucketAcl | Not Planned |
-| PutBucketAnalyticsConfiguration | Not Planned |
-| PutBucketCors | Not Planned |
-| PutBucketEncryption | Not Planned |
-| PutBucketIntelligentTieringConfiguration | Not Planned |
-| PutBucketInventoryConfiguration | Not Planned |
-| PutBucketLifecycle | Not Planned |
-| PutBucketLifecycleConfiguration | Not Planned |
-| PutBucketLogging | Not Planned |
-| PutBucketMetricsConfiguration | Not Planned |
-| PutBucketNotification | Not Planned |
-| PutBucketNotificationConfiguration | Not Planned |
-| PutBucketOwnershipControls | Not Planned |
-| PutBucketPolicy | Not Planned |
-| PutBucketReplication | Not Planned |
-| PutBucketRequestPayment | Not Planned |
-| PutBucketTagging | Not Planned |
-| PutBucketVersioning | Not Planned |
-| PutBucketWebsite | Not Planned |
-| PutObjectAcl | Not Planned |
-| PutObjectLegalHold | Not Planned |
-| PutObjectTagging | Not Planned |
-| PutObjectRetention | Not Planned |
-| PutPublicAccessBlock | Not Planned |
-| SelectObjectContent | Not Planned |
-| UpdateBucketMetadataInventoryTableConfiguration | Not Planned |
-| UpdateBucketMetadataJournalTableConfiguration | Not Planned |
-| UpdateObjectEncryption | Not Planned |
-| WriteGetObjectResponse | Not Planned |
+- CreateMultipartUpload, UploadPart, UploadPartCopy
+- ListParts and ListMultipartUploads
+- CompleteMultipartUpload and AbortMultipartUpload
 
+Unsupported S3 operations return an S3 XML `NotImplemented` response. Not
+planned: IAM/policies, multiple principals, ACLs, virtual-host endpoints,
+versioning, lifecycle rules, object lock, retention, tagging, replication,
+notifications, website hosting, analytics, encryption management, access
+points, S3 Express directory buckets, and RenameObject.
 
-## Development
+## Synology DSM 7
 
-TODO - This is going to be a single-binary server written in Golang.
+The `synology/` directory contains an SPK layout, lower-privilege service
+configuration, lifecycle scripts, firewall metadata, and a packer for x86_64
+and ARMv8 releases. Tagged releases publish SPK artifacts. See
+[`synology/README.md`](synology/README.md) for build and DSM validation notes.
 
-## Testing
+Uninstall scripts intentionally do not erase stored objects. Back up the state
+and remove it manually when data destruction is intended.
 
-Integration tests are located in `test/integration/` and currently test against the **Go AWS SDK v2** (`aws-sdk-go-v2`). Tests cover bucket CRUD operations, object put/get/delete/head/copy, and error handling.
+## Development and verification
 
-**Tested:**
-- ✅ Go AWS SDK v2 (`aws-sdk-go-v2/service/s3`)
+```sh
+make test
+make integration-test
+cd test/integration/python && uv run pytest -v
+make docker
+make cross-build
+make synology-spk
+```
 
-**Planned:**
-- ❌ Python boto3
-- ❌ Non-AWS SDKs (e.g., MinIO SDK)
+CI runs pinned linting, race-enabled unit tests, Go and boto3 SDK integration
+tests, and a container build/smoke test. Integration harnesses always build a
+fresh temporary binary unless `HOME_STORE_BIN` is explicitly supplied.
 
-TODO - We want to have CI/CD running to automate testing.
+Release tags build linux/amd64, linux/arm64, and Linux ARMv7 binaries, x86_64
+and ARMv8 SPKs, SHA-256 checksum manifests, and multi-architecture OCI images.

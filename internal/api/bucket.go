@@ -1,7 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -37,7 +41,7 @@ func (h *Handler) handleListBuckets(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	_ = xml.NewEncoder(w).Encode(resp)
 }
 
@@ -54,8 +58,14 @@ func (h *Handler) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.backend.CreateBucket(r.Context(), bucket); err != nil {
-		if err == storage.ErrBucketExists {
+	location, err := parseCreateBucketLocation(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, s3.InvalidRequest, err.Error())
+		return
+	}
+
+	if err := h.backend.CreateBucket(r.Context(), bucket, location); err != nil {
+		if errors.Is(err, storage.ErrBucketExists) {
 			h.errorResponse(w, http.StatusConflict, s3.BucketAlreadyExists, "bucket already exists")
 		} else {
 			h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to create bucket")
@@ -65,6 +75,35 @@ func (h *Handler) handleCreateBucket(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Location", "/"+bucket)
 	w.WriteHeader(http.StatusOK)
+}
+
+func parseCreateBucketLocation(r *http.Request) (string, error) {
+	if r.Body == nil {
+		return "", nil
+	}
+
+	const maxCreateBucketBody = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxCreateBucketBody+1))
+	if err != nil {
+		return "", fmt.Errorf("failed to read create bucket request body")
+	}
+	if len(body) > maxCreateBucketBody {
+		return "", fmt.Errorf("create bucket configuration is too large")
+	}
+	if strings.TrimSpace(string(body)) == "" {
+		return "", nil
+	}
+
+	decoder := xml.NewDecoder(bytes.NewReader(body))
+	var configuration s3.CreateBucketConfiguration
+	if err := decoder.Decode(&configuration); err != nil || configuration.XMLName.Local != "CreateBucketConfiguration" {
+		return "", fmt.Errorf("invalid create bucket configuration")
+	}
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return "", fmt.Errorf("invalid create bucket configuration")
+	}
+	return strings.TrimSpace(configuration.LocationConstraint), nil
 }
 
 // handleDeleteBucket handles DELETE /{bucket}
@@ -81,8 +120,10 @@ func (h *Handler) handleDeleteBucket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.backend.DeleteBucket(r.Context(), bucket); err != nil {
-		if err == storage.ErrBucketNotFound {
+		if errors.Is(err, storage.ErrBucketNotFound) {
 			h.errorResponse(w, http.StatusNotFound, s3.NoSuchBucket, "bucket does not exist")
+		} else if errors.Is(err, storage.ErrBucketNotEmpty) {
+			h.errorResponse(w, http.StatusConflict, s3.BucketNotEmpty, "the bucket you tried to delete is not empty")
 		} else {
 			h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to delete bucket")
 		}
@@ -94,7 +135,7 @@ func (h *Handler) handleDeleteBucket(w http.ResponseWriter, r *http.Request) {
 
 // handleHeadBucket handles HEAD /{bucket}
 func (h *Handler) handleHeadBucket(w http.ResponseWriter, r *http.Request) {
-	bucket := strings.TrimPrefix(r.URL.Path, "/")
+	bucket := strings.TrimLeft(r.URL.Path, "/")
 	if bucket == "" {
 		h.errorResponse(w, http.StatusBadRequest, s3.InvalidRequest, "bucket name is required")
 		return
@@ -105,18 +146,48 @@ func (h *Handler) handleHeadBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	exists, err := h.backend.BucketExists(r.Context(), bucket)
+	info, err := h.backend.GetBucket(r.Context(), bucket)
 	if err != nil {
-		h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to check bucket")
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			h.errorResponse(w, http.StatusNotFound, s3.NoSuchBucket, "bucket does not exist")
+		} else {
+			h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to check bucket")
+		}
 		return
 	}
-
-	if !exists {
-		h.errorResponse(w, http.StatusNotFound, s3.NoSuchBucket, "bucket does not exist")
-		return
-	}
-
+	w.Header().Set("x-amz-bucket-region", info.Region)
 	w.WriteHeader(http.StatusOK)
+}
+
+// handleGetBucketLocation handles GET /{bucket}?location.
+func (h *Handler) handleGetBucketLocation(w http.ResponseWriter, r *http.Request) {
+	bucket := strings.TrimLeft(r.URL.Path, "/")
+	if !storage.IsValidBucketName(bucket) {
+		h.errorResponse(w, http.StatusBadRequest, s3.InvalidBucketName, "invalid bucket name")
+		return
+	}
+	info, err := h.backend.GetBucket(r.Context(), bucket)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			h.errorResponseWithResource(w, http.StatusNotFound, s3.NoSuchBucket, "the specified bucket does not exist", "/"+bucket)
+		} else {
+			h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to retrieve bucket location")
+		}
+		return
+	}
+	type locationConstraint struct {
+		XMLName xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ LocationConstraint"`
+		Value   string   `xml:",chardata"`
+	}
+	value := info.Region
+	if value == "us-east-1" {
+		value = ""
+	}
+	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("x-amz-bucket-region", info.Region)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(xml.Header))
+	_ = xml.NewEncoder(w).Encode(locationConstraint{Value: value})
 }
 
 // errorResponse writes an S3-compatible error response.
@@ -127,15 +198,20 @@ func (h *Handler) errorResponse(w http.ResponseWriter, statusCode int, code stri
 // errorResponseWithResource writes an S3-compatible error response with resource path.
 func (h *Handler) errorResponseWithResource(w http.ResponseWriter, statusCode int, code string, message string, resource string) {
 	w.Header().Set("Content-Type", "application/xml")
+	requestID := w.Header().Get("x-amz-request-id")
+	if requestID == "" {
+		requestID = generateRequestID()
+		w.Header().Set("x-amz-request-id", requestID)
+	}
 	w.WriteHeader(statusCode)
 
 	resp := s3.ErrorResponse{
 		Code:      code,
 		Message:   message,
 		Resource:  resource,
-		RequestID: generateRequestID(),
+		RequestID: requestID,
 	}
 
-	w.Write([]byte(xml.Header))
+	_, _ = w.Write([]byte(xml.Header))
 	_ = xml.NewEncoder(w).Encode(resp)
 }

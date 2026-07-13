@@ -20,7 +20,7 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.11.4
 
   unit-tests:
     name: Unit Tests
@@ -33,7 +33,32 @@ jobs:
           go-version: "1.25"
 
       - name: Run unit tests
-        run: go test -v -count=1 ./internal/...
+        run: go test -race -v -count=1 ./internal/...
+
+  fuzz-smoke:
+    name: Fuzz Smoke (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: ./internal/auth
+            target: FuzzAWSEncode
+          - package: ./internal/auth
+            target: FuzzCanonicalQuery
+          - package: ./internal/api
+            target: FuzzParseRange
+          - package: ./internal/storage
+            target: FuzzObjectKeyValidation
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Run bounded fuzz target
+        run: go test -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=5s '${{ matrix.package }}'
 
   integration-tests-go:
     name: Integration Tests (Go)
@@ -45,11 +70,11 @@ jobs:
         with:
           go-version: "1.25"
 
-      - name: Build binary
-        run: make build
+      - name: Build race-enabled binary
+        run: go build -race -o bin/home-store-race ./cmd/home-store
 
       - name: Run Go integration tests
-        run: cd test/integration && HOME_STORE_BIN=../../bin/home-store go test -v -count=1 -timeout 120s ./...
+        run: cd test/integration && HOME_STORE_BIN=../../bin/home-store-race go test -race -v -count=1 -timeout 120s ./...
 
   integration-tests-python:
     name: Integration Tests (Python)
@@ -67,6 +92,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.28"
 
       - name: Install Python dependencies
         run: uv sync
@@ -76,5 +103,28 @@ jobs:
         run: make build
 
       - name: Run Python integration tests
-        run: HOME_STORE_BIN=../../bin/home-store pytest -v
+        run: HOME_STORE_BIN=../../bin/home-store uv run pytest -v
         working-directory: test/integration/python
+
+  container-smoke:
+    name: Container Build and Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        run: docker build -t home-store:test -f docker/Dockerfile .
+      - name: Start image
+        run: |
+          docker run -d --name home-store -p 9000:9000 \
+            -e HOME_STORE_ACCESS_KEY=test-access-key \
+            -e HOME_STORE_SECRET_KEY=test-secret-key \
+            -v home-store-ci:/var/lib/home-store home-store:test
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9000/health/ready && exit 0
+            sleep 1
+          done
+          docker logs home-store
+          exit 1
+      - name: Stop cleanly
+        run: docker stop -t 30 home-store

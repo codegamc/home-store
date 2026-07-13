@@ -1,0 +1,3 @@
+#!/bin/sh
+# User state under /var/packages/home-store/var is intentionally not erased here.
+exit 0
