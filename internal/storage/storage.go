@@ -133,6 +133,7 @@ var (
 	ErrNoSuchUpload       = errors.New("multipart upload not found")
 	ErrInvalidPart        = errors.New("invalid multipart part")
 	ErrEntityTooSmall     = errors.New("multipart part too small")
+	ErrInvalidRange       = errors.New("invalid range")
 )
 
 // IsValidObjectKey validates the constraints shared by general-purpose S3 buckets.

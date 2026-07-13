@@ -39,7 +39,8 @@ func metadataFromRequest(r *http.Request) (storage.ObjectMeta, error) {
 	for name, values := range r.Header {
 		lower := strings.ToLower(name)
 		if strings.HasPrefix(lower, "x-amz-meta-") && len(values) != 0 {
-			meta.UserMetadata[lower] = strings.Join(values, ",")
+			// If multiple values for same meta header, keep last per S3 spec (not comma-join which breaks values containing commas)
+			meta.UserMetadata[lower] = values[len(values)-1]
 		}
 	}
 	if contentMD5 := r.Header.Get("Content-MD5"); contentMD5 != "" {
@@ -199,24 +200,34 @@ func (h *Handler) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleCopyObject(w http.ResponseWriter, r *http.Request) {
 	dstBucket, dstKey := parseBucketKey(r.URL.Path)
-	copySource, err := url.PathUnescape(strings.TrimPrefix(r.Header.Get("x-amz-copy-source"), "/"))
+	rawSource := strings.TrimPrefix(r.Header.Get("x-amz-copy-source"), "/")
+	slashIdx := strings.Index(rawSource, "/")
+	if slashIdx <= 0 {
+		h.errorResponse(w, http.StatusBadRequest, s3.InvalidRequest, "invalid x-amz-copy-source header")
+		return
+	}
+	bkt, err := url.PathUnescape(rawSource[:slashIdx])
 	if err != nil {
 		h.errorResponse(w, http.StatusBadRequest, s3.InvalidRequest, "invalid x-amz-copy-source header")
 		return
 	}
-	parts := strings.SplitN(copySource, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || !storage.IsValidObjectKey(parts[1]) {
+	k, err := url.PathUnescape(rawSource[slashIdx+1:])
+	if err != nil {
 		h.errorResponse(w, http.StatusBadRequest, s3.InvalidRequest, "invalid x-amz-copy-source header")
 		return
 	}
-	reader, sourceMeta, err := h.backend.GetObject(r.Context(), parts[0], parts[1])
+	if bkt == "" || !storage.IsValidObjectKey(k) {
+		h.errorResponse(w, http.StatusBadRequest, s3.InvalidRequest, "invalid x-amz-copy-source header")
+		return
+	}
+	reader, sourceMeta, err := h.backend.GetObject(r.Context(), bkt, k)
 	if err != nil {
 		h.handleStorageError(w, r, err, "failed to retrieve copy source")
 		return
 	}
 	defer func() { _ = reader.Close() }()
 	if status := evaluateReadConditions(sourceMeta, r.Header, "x-amz-copy-source-"); status != 0 {
-		h.errorResponseWithResource(w, http.StatusPreconditionFailed, s3.PreconditionFailed, "copy source condition failed", "/"+copySource)
+		h.errorResponseWithResource(w, http.StatusPreconditionFailed, s3.PreconditionFailed, "copy source condition failed", "/"+rawSource)
 		return
 	}
 	meta := sourceMeta
@@ -268,11 +279,16 @@ func evaluateReadConditions(meta storage.ObjectMeta, headers http.Header, prefix
 }
 
 func etagMatches(value, etag string) bool {
-	if strings.TrimSpace(value) == "*" {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "*" {
 		return true
 	}
+	cleanETag := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(etag), "W/"))
 	for _, candidate := range strings.Split(value, ",") {
-		if strings.TrimSpace(candidate) == etag {
+		c := strings.TrimSpace(candidate)
+		c = strings.TrimPrefix(c, "W/")
+		c = strings.TrimSpace(c)
+		if c == etag || c == cleanETag {
 			return true
 		}
 	}
@@ -284,16 +300,16 @@ func parseRange(value string, size int64) (start, length int64, partial bool, er
 		return 0, size, false, nil
 	}
 	if !strings.HasPrefix(value, "bytes=") || strings.Contains(value, ",") || size == 0 {
-		return 0, 0, false, storage.ErrInvalidKey
+		return 0, 0, false, storage.ErrInvalidRange
 	}
 	parts := strings.SplitN(strings.TrimPrefix(value, "bytes="), "-", 2)
 	if len(parts) != 2 {
-		return 0, 0, false, storage.ErrInvalidKey
+		return 0, 0, false, storage.ErrInvalidRange
 	}
 	if parts[0] == "" {
 		suffix, parseErr := strconv.ParseInt(parts[1], 10, 64)
 		if parseErr != nil || suffix <= 0 {
-			return 0, 0, false, storage.ErrInvalidKey
+			return 0, 0, false, storage.ErrInvalidRange
 		}
 		if suffix > size {
 			suffix = size
@@ -302,13 +318,13 @@ func parseRange(value string, size int64) (start, length int64, partial bool, er
 	}
 	start, err = strconv.ParseInt(parts[0], 10, 64)
 	if err != nil || start < 0 || start >= size {
-		return 0, 0, false, storage.ErrInvalidKey
+		return 0, 0, false, storage.ErrInvalidRange
 	}
 	end := size - 1
 	if parts[1] != "" {
 		end, err = strconv.ParseInt(parts[1], 10, 64)
 		if err != nil || end < start {
-			return 0, 0, false, storage.ErrInvalidKey
+			return 0, 0, false, storage.ErrInvalidRange
 		}
 		if end >= size {
 			end = size - 1
@@ -328,6 +344,9 @@ func (h *Handler) handleStorageError(w http.ResponseWriter, r *http.Request, err
 		h.errorResponseWithResource(w, http.StatusPreconditionFailed, s3.PreconditionFailed, "at least one of the preconditions you specified did not hold", r.URL.Path)
 	case errors.Is(err, storage.ErrInvalidDigest):
 		h.errorResponseWithResource(w, http.StatusBadRequest, s3.InvalidDigest, "the content checksum you specified was invalid", r.URL.Path)
+	case errors.Is(err, storage.ErrInvalidRange):
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", 0))
+		h.errorResponseWithResource(w, http.StatusRequestedRangeNotSatisfiable, s3.InvalidRange, "the requested range is not satisfiable", r.URL.Path)
 	case errors.Is(err, storage.ErrInvalidKey):
 		h.errorResponseWithResource(w, http.StatusBadRequest, s3.InvalidArgument, "invalid object key or request argument", r.URL.Path)
 	case errors.Is(err, storage.ErrNoSuchUpload):
@@ -337,6 +356,10 @@ func (h *Handler) handleStorageError(w http.ResponseWriter, r *http.Request, err
 	case errors.Is(err, storage.ErrEntityTooSmall):
 		h.errorResponseWithResource(w, http.StatusBadRequest, s3.EntityTooSmall, "your proposed upload is smaller than the minimum allowed object size", r.URL.Path)
 	default:
+		if strings.Contains(err.Error(), "aws-chunked") {
+			h.errorResponseWithResource(w, http.StatusBadRequest, s3.InvalidDigest, "invalid chunked upload", r.URL.Path)
+			return
+		}
 		h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, fallback)
 	}
 }

@@ -144,6 +144,25 @@ class TestCopyObject:
         assert got == body
 
 
+class TestListObjects:
+    """Tests object-listing compatibility with URL-sensitive keys."""
+
+    def test_list_objects_preserves_url_sensitive_keys(
+        self, s3_client, unique_name, cleanup_buckets
+    ):
+        bucket = cleanup_buckets(unique_name("list-url-keys"))
+        s3_client.create_bucket(Bucket=bucket)
+        keys = ["folder/a+b %/雪", "literal%2F"]
+        for key in keys:
+            s3_client.put_object(Bucket=bucket, Key=key, Body=key.encode())
+
+        response = s3_client.list_objects_v2(Bucket=bucket)
+        # Botocore requests URL encoding and decodes the response only when
+        # the server returns the required EncodingType field.
+        assert response["EncodingType"] == "url"
+        assert [entry["Key"] for entry in response["Contents"]] == keys
+
+
 class TestObjectWorkflow:
     """End-to-end test of the complete object lifecycle."""
 

@@ -2,13 +2,15 @@ package api
 
 import (
 	"crypto/md5"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/xml"
+	"hash/crc32"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/codegamc/home-store/internal/s3"
@@ -37,13 +39,17 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request, v2 b
 	}
 	encode := func(value string) string {
 		if query.Get("encoding-type") == "url" {
-			return url.PathEscape(value)
+			return s3URLEncode(value)
 		}
 		return value
 	}
 	objects := make([]s3.Object, 0, len(result.Objects))
+	var owner *s3.Owner
+	if query.Get("fetch-owner") == "true" {
+		owner = &s3.Owner{ID: "homestore", DisplayName: "HomeStore"}
+	}
 	for _, object := range result.Objects {
-		objects = append(objects, s3.Object{Key: encode(object.Key), LastModified: object.LastModified.UTC().Format(time.RFC3339), ETag: object.ETag, Size: object.Size, StorageClass: "STANDARD"})
+		objects = append(objects, s3.Object{Key: encode(object.Key), LastModified: object.LastModified.UTC().Format(time.RFC3339), ETag: object.ETag, Size: object.Size, StorageClass: "STANDARD", Owner: owner})
 	}
 	prefixes := make([]s3.CommonPrefix, 0, len(result.CommonPrefixes))
 	for _, prefix := range result.CommonPrefixes {
@@ -54,18 +60,38 @@ func (h *Handler) handleListObjects(w http.ResponseWriter, r *http.Request, v2 b
 	_, _ = w.Write([]byte(xml.Header))
 	if v2 {
 		response := s3.ListObjectsV2Result{
-			Name: bucket, Prefix: encode(query.Get("prefix")), MaxKeys: maxKeys, IsTruncated: result.IsTruncated,
+			Name: bucket, Prefix: encode(query.Get("prefix")), Delimiter: encode(query.Get("delimiter")), StartAfter: encode(query.Get("start-after")), MaxKeys: maxKeys, IsTruncated: result.IsTruncated,
 			Contents: objects, CommonPrefixes: prefixes, ContinuationToken: query.Get("continuation-token"),
-			NextToken: result.NextContinuationToken, KeyCount: len(objects) + len(prefixes),
+			NextToken: result.NextContinuationToken, KeyCount: len(objects) + len(prefixes), EncodingType: query.Get("encoding-type"),
 		}
 		_ = xml.NewEncoder(w).Encode(response)
 		return
 	}
 	response := s3.ListObjectsResult{
 		Name: bucket, Prefix: encode(query.Get("prefix")), Marker: encode(query.Get("marker")), NextMarker: encode(result.NextMarker),
-		Delimiter: encode(query.Get("delimiter")), MaxKeys: maxKeys, IsTruncated: result.IsTruncated, Contents: objects, CommonPrefixes: prefixes,
+		Delimiter: encode(query.Get("delimiter")), MaxKeys: maxKeys, IsTruncated: result.IsTruncated, EncodingType: query.Get("encoding-type"), Contents: objects, CommonPrefixes: prefixes,
 	}
 	_ = xml.NewEncoder(w).Encode(response)
+}
+
+// s3URLEncode applies S3's URL encoding rules for XML listing results. It is
+// byte-oriented so UTF-8 keys are encoded exactly as AWS clients expect,
+// rather than using form or path escaping semantics.
+func s3URLEncode(value string) string {
+	const hexChars = "0123456789ABCDEF"
+	var encoded strings.Builder
+	encoded.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-' || b == '_' || b == '.' || b == '~' {
+			encoded.WriteByte(b)
+			continue
+		}
+		encoded.WriteByte('%')
+		encoded.WriteByte(hexChars[b>>4])
+		encoded.WriteByte(hexChars[b&0x0f])
+	}
+	return encoded.String()
 }
 
 func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request) {
@@ -117,11 +143,34 @@ func verifyRequestChecksum(r *http.Request, body []byte) error {
 			return storage.ErrInvalidDigest
 		}
 	}
-	if value := r.Header.Get("x-amz-checksum-sha256"); value != "" {
-		digest := sha256.Sum256(body)
-		if base64.StdEncoding.EncodeToString(digest[:]) != value {
+	checksums := []struct {
+		header string
+		value  string
+	}{
+		{"x-amz-checksum-crc32", base64.StdEncoding.EncodeToString(crc32Checksum(body, crc32.IEEETable))},
+		{"x-amz-checksum-crc32c", base64.StdEncoding.EncodeToString(crc32Checksum(body, crc32.MakeTable(crc32.Castagnoli)))},
+		{"x-amz-checksum-sha1", sha1Checksum(body)},
+		{"x-amz-checksum-sha256", sha256Checksum(body)},
+	}
+	for _, checksum := range checksums {
+		if value := r.Header.Get(checksum.header); value != "" && value != checksum.value {
 			return storage.ErrInvalidDigest
 		}
 	}
 	return nil
+}
+
+func crc32Checksum(body []byte, table *crc32.Table) []byte {
+	value := crc32.Checksum(body, table)
+	return []byte{byte(value >> 24), byte(value >> 16), byte(value >> 8), byte(value)}
+}
+
+func sha1Checksum(body []byte) string {
+	digest := sha1.Sum(body)
+	return base64.StdEncoding.EncodeToString(digest[:])
+}
+
+func sha256Checksum(body []byte) string {
+	digest := sha256.Sum256(body)
+	return base64.StdEncoding.EncodeToString(digest[:])
 }

@@ -199,6 +199,25 @@ func TestDelimiterPaginationDoesNotRepeatCommonPrefix(t *testing.T) {
 	assert.Equal(t, "z", aws.ToString(second.Contents[0].Key))
 }
 
+func TestListObjectsV2PreservesURLSensitiveKeys(t *testing.T) {
+	ctx := context.Background()
+	bucket := generateBucketName("url-keys")
+	defer cleanupBucket(ctx, bucket)
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	require.NoError(t, err)
+	for _, key := range []string{"folder/a+b %/雪", "literal%2F"} {
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: bytes.NewReader([]byte(key))})
+		require.NoError(t, err)
+	}
+	listing, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket), Delimiter: aws.String("/"), FetchOwner: aws.Bool(true)})
+	require.NoError(t, err)
+	assert.Len(t, listing.CommonPrefixes, 1)
+	assert.Equal(t, "folder/", aws.ToString(listing.CommonPrefixes[0].Prefix))
+	require.Len(t, listing.Contents, 1)
+	assert.Equal(t, "literal%2F", aws.ToString(listing.Contents[0].Key))
+	assert.NotNil(t, listing.Contents[0].Owner)
+}
+
 func TestUnsupportedSubresourceReturnsS3NotImplemented(t *testing.T) {
 	ctx := context.Background()
 	bucket := generateBucketName("unsupported")
@@ -269,6 +288,38 @@ func TestMultipartUpload(t *testing.T) {
 	require.NoError(t, err)
 	_, err = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String("aborted.bin"), UploadId: aborted.UploadId})
 	require.NoError(t, err)
+}
+
+func TestListMultipartUploadsDelimiter(t *testing.T) {
+	ctx := context.Background()
+	bucket := generateBucketName("multipart-list")
+	defer cleanupBucket(ctx, bucket)
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	require.NoError(t, err)
+	first, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String("dir/a")})
+	require.NoError(t, err)
+	second, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String("dir/b")})
+	require.NoError(t, err)
+	root, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String("root")})
+	require.NoError(t, err)
+	listing, err := client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: aws.String(bucket), Delimiter: aws.String("/"), MaxUploads: aws.Int32(1)})
+	require.NoError(t, err)
+	assert.Len(t, listing.CommonPrefixes, 1)
+	assert.Equal(t, "dir/", aws.ToString(listing.CommonPrefixes[0].Prefix))
+	assert.True(t, aws.ToBool(listing.IsTruncated))
+	secondPage, err := client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+		Bucket: aws.String(bucket), Delimiter: aws.String("/"), MaxUploads: aws.Int32(1),
+		KeyMarker: listing.NextKeyMarker, UploadIdMarker: listing.NextUploadIdMarker,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, secondPage.CommonPrefixes)
+	listing = secondPage
+	require.Len(t, listing.Uploads, 1)
+	assert.Equal(t, "root", aws.ToString(listing.Uploads[0].Key))
+	for _, upload := range []struct{ key, id string }{{"dir/a", aws.ToString(first.UploadId)}, {"dir/b", aws.ToString(second.UploadId)}, {"root", aws.ToString(root.UploadId)}} {
+		_, err := client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String(upload.key), UploadId: aws.String(upload.id)})
+		require.NoError(t, err)
+	}
 }
 
 func TestMultipartRejectsInvalidCompletion(t *testing.T) {

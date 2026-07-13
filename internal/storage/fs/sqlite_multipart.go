@@ -45,7 +45,17 @@ func (s *SQLiteMetadataStore) GetMultipartUpload(ctx context.Context, bucket, ke
 }
 
 func (s *SQLiteMetadataStore) ListMultipartUploads(ctx context.Context, bucket, prefix string) ([]storage.MultipartUpload, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT upload_id, bucket, key, created_at, metadata FROM multipart_uploads WHERE bucket = ? ORDER BY key, upload_id`, bucket)
+	var query string
+	var args []any
+	if prefix == "" {
+		query = `SELECT upload_id, bucket, key, created_at, metadata FROM multipart_uploads WHERE bucket = ? ORDER BY key, upload_id`
+		args = []any{bucket}
+	} else {
+		escaped := escapeLikePattern(prefix)
+		query = `SELECT upload_id, bucket, key, created_at, metadata FROM multipart_uploads WHERE bucket = ? AND key LIKE ? ESCAPE '\' ORDER BY key, upload_id`
+		args = []any{bucket, escaped + "%"}
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list multipart uploads: %w", err)
 	}
@@ -56,9 +66,6 @@ func (s *SQLiteMetadataStore) ListMultipartUploads(ctx context.Context, bucket, 
 		var createdAt, metadata string
 		if err := rows.Scan(&upload.UploadID, &upload.Bucket, &upload.Key, &createdAt, &metadata); err != nil {
 			return nil, err
-		}
-		if len(prefix) > len(upload.Key) || upload.Key[:len(prefix)] != prefix {
-			continue
 		}
 		upload.CreatedAt, err = time.Parse(sqliteTimeFormat, createdAt)
 		if err != nil {

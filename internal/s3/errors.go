@@ -23,5 +23,5 @@ const (
 	InvalidArgument       = "InvalidArgument"
 	AccessKeyIDNotFound   = "InvalidAccessKeyId"
 	RequestTimeTooSkewed  = "RequestTimeTooSkewed"
-	ExpiredToken          = "AccessDenied"
+	ExpiredToken          = "ExpiredToken"
 )

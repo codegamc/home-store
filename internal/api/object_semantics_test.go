@@ -2,8 +2,10 @@ package api
 
 import (
 	"crypto/md5"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
+	"hash/crc32"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -106,6 +108,74 @@ func TestMetadataAndRequestChecksums(t *testing.T) {
 	}
 	if err := verifyRequestChecksum(request, []byte("tampered")); err != storage.ErrInvalidDigest {
 		t.Fatalf("expected invalid digest, got %v", err)
+	}
+}
+
+func TestVerifyRequestChecksumValidatesAllSupportedAlgorithms(t *testing.T) {
+	body := []byte("checksummed")
+	sha1Digest := sha1.Sum(body)
+	sha256Digest := sha256.Sum256(body)
+	for _, checksum := range []struct {
+		name   string
+		header string
+		value  string
+	}{
+		{name: "crc32", header: "x-amz-checksum-crc32", value: base64.StdEncoding.EncodeToString(crc32Checksum(body, crc32.IEEETable))},
+		{name: "crc32c", header: "x-amz-checksum-crc32c", value: base64.StdEncoding.EncodeToString(crc32Checksum(body, crc32.MakeTable(crc32.Castagnoli)))},
+		{name: "sha1", header: "x-amz-checksum-sha1", value: base64.StdEncoding.EncodeToString(sha1Digest[:])},
+		{name: "sha256", header: "x-amz-checksum-sha256", value: base64.StdEncoding.EncodeToString(sha256Digest[:])},
+	} {
+		t.Run(checksum.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/bucket?delete", nil)
+			request.Header.Set(checksum.header, checksum.value)
+			if err := verifyRequestChecksum(request, body); err != nil {
+				t.Fatal(err)
+			}
+			if err := verifyRequestChecksum(request, []byte("tampered")); err != storage.ErrInvalidDigest {
+				t.Fatalf("expected invalid digest, got %v", err)
+			}
+		})
+	}
+}
+
+func TestS3URLEncode(t *testing.T) {
+	if got, want := s3URLEncode("folder/a+b %/雪"), "folder%2Fa%2Bb%20%25%2F%E9%9B%AA"; got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestMultipartPaginationParameters(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  int
+		valid bool
+	}{
+		{"", 1000, true}, {"1", 1, true}, {"1000", 1000, true}, {"0", 0, false}, {"1001", 0, false}, {"bad", 0, false},
+	} {
+		got, err := parsePositivePageSize(test.value)
+		if test.valid {
+			if err != nil || got != test.want {
+				t.Fatalf("page size %q: got %d, err=%v", test.value, got, err)
+			}
+		} else if err == nil {
+			t.Fatalf("page size %q unexpectedly succeeded", test.value)
+		}
+	}
+	for _, test := range []struct {
+		value string
+		want  int
+		valid bool
+	}{
+		{"", 0, true}, {"0", 0, true}, {"10000", 10000, true}, {"-1", 0, false}, {"bad", 0, false},
+	} {
+		got, err := parseNonNegativeMarker(test.value)
+		if test.valid {
+			if err != nil || got != test.want {
+				t.Fatalf("marker %q: got %d, err=%v", test.value, got, err)
+			}
+		} else if err == nil {
+			t.Fatalf("marker %q unexpectedly succeeded", test.value)
+		}
 	}
 }
 

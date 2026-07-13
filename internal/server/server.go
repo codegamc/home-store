@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"log/slog"
 	"net"
@@ -23,6 +24,8 @@ func New(addr string, handler http.Handler) *Server {
 			Addr:              addr,
 			Handler:           requestLogger(handler),
 			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      10 * time.Minute,
 			IdleTimeout:       2 * time.Minute,
 			MaxHeaderBytes:    1 << 20,
 		},
@@ -46,6 +49,26 @@ func (w *loggingResponseWriter) Write(body []byte) (int, error) {
 		w.WriteHeader(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(body)
+}
+
+func (w *loggingResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
+}
+
+func (w *loggingResponseWriter) Push(target string, opts *http.PushOptions) error {
+	if p, ok := w.ResponseWriter.(http.Pusher); ok {
+		return p.Push(target, opts)
+	}
+	return http.ErrNotSupported
 }
 
 func requestLogger(next http.Handler) http.Handler {

@@ -135,7 +135,7 @@ func (h *Handler) handleDeleteBucket(w http.ResponseWriter, r *http.Request) {
 
 // handleHeadBucket handles HEAD /{bucket}
 func (h *Handler) handleHeadBucket(w http.ResponseWriter, r *http.Request) {
-	bucket := strings.TrimPrefix(r.URL.Path, "/")
+	bucket := strings.TrimLeft(r.URL.Path, "/")
 	if bucket == "" {
 		h.errorResponse(w, http.StatusBadRequest, s3.InvalidRequest, "bucket name is required")
 		return
@@ -146,26 +146,26 @@ func (h *Handler) handleHeadBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	exists, err := h.backend.BucketExists(r.Context(), bucket)
-	if err != nil {
-		h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to check bucket")
-		return
-	}
-
-	if !exists {
-		h.errorResponse(w, http.StatusNotFound, s3.NoSuchBucket, "bucket does not exist")
-		return
-	}
 	info, err := h.backend.GetBucket(r.Context(), bucket)
-	if err == nil {
-		w.Header().Set("x-amz-bucket-region", info.Region)
+	if err != nil {
+		if errors.Is(err, storage.ErrBucketNotFound) {
+			h.errorResponse(w, http.StatusNotFound, s3.NoSuchBucket, "bucket does not exist")
+		} else {
+			h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to check bucket")
+		}
+		return
 	}
+	w.Header().Set("x-amz-bucket-region", info.Region)
 	w.WriteHeader(http.StatusOK)
 }
 
 // handleGetBucketLocation handles GET /{bucket}?location.
 func (h *Handler) handleGetBucketLocation(w http.ResponseWriter, r *http.Request) {
-	bucket := strings.TrimPrefix(r.URL.Path, "/")
+	bucket := strings.TrimLeft(r.URL.Path, "/")
+	if !storage.IsValidBucketName(bucket) {
+		h.errorResponse(w, http.StatusBadRequest, s3.InvalidBucketName, "invalid bucket name")
+		return
+	}
 	info, err := h.backend.GetBucket(r.Context(), bucket)
 	if err != nil {
 		if errors.Is(err, storage.ErrBucketNotFound) {

@@ -3,9 +3,12 @@ package api
 import (
 	cryptorand "crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/codegamc/home-store/internal/s3"
 	"github.com/codegamc/home-store/internal/storage"
@@ -14,7 +17,8 @@ import (
 func generateRequestID() string {
 	value := make([]byte, 16)
 	if _, err := cryptorand.Read(value); err != nil {
-		return "homestore-request"
+		// Fallback to time-based ID instead of constant to avoid collisions
+		return hex.EncodeToString([]byte(fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())))[:32]
 	}
 	return hex.EncodeToString(value)
 }
@@ -28,7 +32,11 @@ func NewHandler(backend storage.Backend) *Handler {
 }
 
 func parseBucketKey(path string) (bucket, key string) {
-	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
+	trimmed := strings.TrimLeft(path, "/")
+	if trimmed == "" {
+		return "", ""
+	}
+	parts := strings.SplitN(trimmed, "/", 2)
 	bucket = parts[0]
 	if len(parts) == 2 {
 		key = parts[1]
@@ -193,14 +201,14 @@ func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 func hasUnsupportedQuery(query url.Values, allowed ...string) bool {
 	allowedSet := make(map[string]bool, len(allowed))
 	for _, value := range allowed {
-		allowedSet[value] = true
+		allowedSet[strings.ToLower(value)] = true
 	}
 	for name := range query {
 		lower := strings.ToLower(name)
 		if strings.HasPrefix(lower, "x-amz-") || lower == "x-id" {
 			continue
 		}
-		if !allowedSet[name] {
+		if !allowedSet[lower] {
 			return true
 		}
 	}

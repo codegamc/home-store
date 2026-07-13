@@ -24,11 +24,14 @@ type SQLiteMetadataStore struct {
 
 // NewSQLiteMetadataStore creates a SQLite-backed metadata store.
 func NewSQLiteMetadataStore(dbPath string) (*SQLiteMetadataStore, error) {
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	// Use WAL mode for better concurrency and durability.
+	// The busy_timeout pragma helps with SQLITE_BUSY on concurrent access.
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
@@ -51,6 +54,9 @@ func NewSQLiteMetadataStore(dbPath string) (*SQLiteMetadataStore, error) {
 func (s *SQLiteMetadataStore) init(ctx context.Context) error {
 	statements := []string{
 		`PRAGMA foreign_keys = ON;`,
+		`PRAGMA journal_mode = WAL;`,
+		`PRAGMA synchronous = NORMAL;`,
+		`PRAGMA busy_timeout = 5000;`,
 		`CREATE TABLE IF NOT EXISTS buckets (
 			name TEXT PRIMARY KEY,
 			created_at TEXT NOT NULL,
@@ -108,6 +114,7 @@ func (s *SQLiteMetadataStore) init(ctx context.Context) error {
 	}
 
 	// Columns are added individually for databases created by the pre-versioned schema.
+	// This handles upgrades from very early versions.
 	for _, stmt := range []string{
 		`ALTER TABLE objects ADD COLUMN blob_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE objects ADD COLUMN cache_control TEXT NOT NULL DEFAULT ''`,
@@ -117,12 +124,23 @@ func (s *SQLiteMetadataStore) init(ctx context.Context) error {
 		`ALTER TABLE objects ADD COLUMN expires TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE objects ADD COLUMN checksum_sha256 TEXT NOT NULL DEFAULT ''`,
 	} {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			lower := strings.ToLower(err.Error())
+			if strings.Contains(lower, "duplicate column") || strings.Contains(lower, "already exists") || strings.Contains(lower, "duplicate") {
+				continue
+			}
 			return fmt.Errorf("failed to migrate sqlite schema: %w", err)
 		}
 	}
 
 	return nil
+}
+
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }
 
 func (s *SQLiteMetadataStore) MigrationCompleted(ctx context.Context, name string) (bool, error) {
@@ -301,12 +319,24 @@ func (s *SQLiteMetadataStore) DeleteMetadata(ctx context.Context, bucket, key st
 
 // ListMetadata lists metadata for objects in a bucket matching a prefix.
 func (s *SQLiteMetadataStore) ListMetadata(ctx context.Context, bucket, prefix string) ([]storage.ObjectMeta, error) {
-	query := `SELECT key, blob_id, content_type, content_length, etag, last_modified, user_metadata,
-		cache_control, content_disposition, content_encoding, content_language, expires, checksum_sha256
-		FROM objects
-		WHERE bucket = ?`
-	args := []any{bucket}
-	query += ` ORDER BY key`
+	var query string
+	var args []any
+	if prefix == "" {
+		query = `SELECT key, blob_id, content_type, content_length, etag, last_modified, user_metadata,
+			cache_control, content_disposition, content_encoding, content_language, expires, checksum_sha256
+			FROM objects
+			WHERE bucket = ?
+			ORDER BY key`
+		args = []any{bucket}
+	} else {
+		escaped := escapeLikePattern(prefix)
+		query = `SELECT key, blob_id, content_type, content_length, etag, last_modified, user_metadata,
+			cache_control, content_disposition, content_encoding, content_language, expires, checksum_sha256
+			FROM objects
+			WHERE bucket = ? AND key LIKE ? ESCAPE '\'
+			ORDER BY key`
+		args = []any{bucket, escaped + "%"}
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -320,9 +350,7 @@ func (s *SQLiteMetadataStore) ListMetadata(ctx context.Context, bucket, prefix s
 		if err != nil {
 			return nil, err
 		}
-		if strings.HasPrefix(meta.Key, prefix) {
-			results = append(results, meta)
-		}
+		results = append(results, meta)
 	}
 
 	if err := rows.Err(); err != nil {

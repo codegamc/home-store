@@ -287,7 +287,7 @@ type authError struct {
 
 func writeAuthError(w http.ResponseWriter, r *http.Request, code, message string) {
 	status := http.StatusForbidden
-	if code == "AuthorizationHeaderMalformed" || code == "AuthorizationQueryParametersError" {
+	if code == "AuthorizationHeaderMalformed" || code == "AuthorizationQueryParametersError" || code == "ExpiredToken" {
 		status = http.StatusBadRequest
 	}
 	idBytes := make([]byte, 16)

@@ -60,6 +60,9 @@ func (f *FSBackend) stageBlob(ctx context.Context, body io.Reader, expectedSHA25
 	crc32cHash := crc32.New(crc32.MakeTable(crc32.Castagnoli))
 	written, err := io.Copy(io.MultiWriter(tmp, md5Hash, sha1Hash, shaHash, crc32Hash, crc32cHash), body)
 	if err != nil {
+		if strings.Contains(err.Error(), "aws-chunked") {
+			return stagedBlob{}, storage.ErrInvalidDigest
+		}
 		return stagedBlob{}, fmt.Errorf("failed to write object data: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
@@ -131,6 +134,31 @@ func (f *FSBackend) PutObjectConditional(ctx context.Context, bucket, key string
 	if !storage.IsValidObjectKey(key) {
 		return storage.ObjectMeta{}, storage.ErrInvalidKey
 	}
+
+	f.mu.RLock()
+	exists, err := f.metaStore.BucketExists(ctx, bucket)
+	if err != nil {
+		f.mu.RUnlock()
+		return storage.ObjectMeta{}, err
+	}
+	if !exists {
+		f.mu.RUnlock()
+		return storage.ObjectMeta{}, storage.ErrBucketNotFound
+	}
+	var preExisting *storage.ObjectMeta
+	oldMeta, err := f.metaStore.GetMetadata(ctx, bucket, key)
+	if err == nil {
+		preExisting = &oldMeta
+	} else if err != storage.ErrObjectNotFound {
+		f.mu.RUnlock()
+		return storage.ObjectMeta{}, err
+	}
+	if !storage.ConditionsMatch(preExisting, conditions) {
+		f.mu.RUnlock()
+		return storage.ObjectMeta{}, storage.ErrPreconditionFailed
+	}
+	f.mu.RUnlock()
+
 	staged, err := f.stageBlob(ctx, body, meta.ChecksumSHA256, meta.ExpectedChecksumAlgorithm, meta.ExpectedChecksum)
 	if err != nil {
 		return storage.ObjectMeta{}, err
@@ -148,7 +176,7 @@ func (f *FSBackend) PutObjectConditional(ctx context.Context, bucket, key string
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	exists, err := f.metaStore.BucketExists(ctx, bucket)
+	exists, err = f.metaStore.BucketExists(ctx, bucket)
 	if err != nil {
 		return storage.ObjectMeta{}, err
 	}
@@ -156,7 +184,7 @@ func (f *FSBackend) PutObjectConditional(ctx context.Context, bucket, key string
 		return storage.ObjectMeta{}, storage.ErrBucketNotFound
 	}
 	var existing *storage.ObjectMeta
-	oldMeta, err := f.metaStore.GetMetadata(ctx, bucket, key)
+	oldMeta, err = f.metaStore.GetMetadata(ctx, bucket, key)
 	if err == nil {
 		existing = &oldMeta
 	} else if err != storage.ErrObjectNotFound {
@@ -200,11 +228,10 @@ func (f *FSBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadC
 	if err != nil {
 		return nil, storage.ObjectMeta{}, err
 	}
-	path := f.blobFilePath(meta.BlobID)
 	if meta.BlobID == "" {
-		path = filepath.Join(f.basePath, bucket, filepath.FromSlash(key))
+		return nil, storage.ObjectMeta{}, storage.ErrObjectNotFound
 	}
-	file, err := os.Open(path)
+	file, err := os.Open(f.blobFilePath(meta.BlobID))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, storage.ObjectMeta{}, storage.ErrObjectNotFound
@@ -259,11 +286,21 @@ func (f *FSBackend) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket
 		return storage.ObjectMeta{}, err
 	}
 	defer func() { _ = reader.Close() }()
-	srcMeta.Key = dstKey
-	srcMeta.BlobID = ""
-	srcMeta.ETag = ""
-	srcMeta.ChecksumSHA256 = ""
-	return f.PutObjectConditional(ctx, dstBucket, dstKey, reader, srcMeta, storage.Conditions{})
+	copiedMeta := srcMeta
+	if srcMeta.UserMetadata != nil {
+		copiedMeta.UserMetadata = make(map[string]string, len(srcMeta.UserMetadata))
+		for k, v := range srcMeta.UserMetadata {
+			copiedMeta.UserMetadata[k] = v
+		}
+	}
+	copiedMeta.Key = dstKey
+	copiedMeta.BlobID = ""
+	copiedMeta.ETag = ""
+	copiedMeta.ChecksumSHA256 = ""
+	copiedMeta.ExpectedMD5 = ""
+	copiedMeta.ExpectedChecksumAlgorithm = ""
+	copiedMeta.ExpectedChecksum = ""
+	return f.PutObjectConditional(ctx, dstBucket, dstKey, reader, copiedMeta, storage.Conditions{})
 }
 
 func (f *FSBackend) ListObjects(ctx context.Context, bucket string, opts storage.ListOptions) (storage.ListResult, error) {
@@ -295,23 +332,32 @@ func (f *FSBackend) ListObjects(ctx context.Context, bucket string, opts storage
 	if maxKeys < 0 || maxKeys > 1000 {
 		maxKeys = 1000
 	}
+	result := storage.ListResult{}
 	if maxKeys == 0 {
-		return storage.ListResult{}, nil
+		for _, m := range objects {
+			if m.Key > start {
+				result.IsTruncated = true
+				result.NextMarker = m.Key
+				result.NextContinuationToken = base64.RawURLEncoding.EncodeToString([]byte(m.Key))
+				break
+			}
+		}
+		return result, nil
 	}
 
-	result := storage.ListResult{}
 	seenPrefixes := map[string]bool{}
 	emitted := 0
 	lastExamined := ""
-	for i, meta := range objects {
+
+	for _, meta := range objects {
 		if meta.Key <= start {
 			continue
 		}
 		entryPrefix := ""
 		if opts.Delimiter != "" {
 			remainder := strings.TrimPrefix(meta.Key, opts.Prefix)
-			if index := strings.Index(remainder, opts.Delimiter); index >= 0 {
-				entryPrefix = opts.Prefix + remainder[:index+len(opts.Delimiter)]
+			if idx := strings.Index(remainder, opts.Delimiter); idx >= 0 {
+				entryPrefix = opts.Prefix + remainder[:idx+len(opts.Delimiter)]
 			}
 		}
 		if entryPrefix != "" && seenPrefixes[entryPrefix] {
@@ -330,51 +376,33 @@ func (f *FSBackend) ListObjects(ctx context.Context, bucket string, opts storage
 			result.Objects = append(result.Objects, storage.ObjectInfo{Key: meta.Key, Size: meta.ContentLength, LastModified: meta.LastModified, ETag: meta.ETag})
 		}
 		emitted++
-		if i < len(objects)-1 && emitted == maxKeys {
+	}
+
+	if emitted == maxKeys && !result.IsTruncated {
+		// Check if there are more distinct entries beyond lastExamined
+		for _, m := range objects {
+			if m.Key <= lastExamined {
+				continue
+			}
+			if opts.Delimiter != "" {
+				rem := strings.TrimPrefix(m.Key, opts.Prefix)
+				if idx := strings.Index(rem, opts.Delimiter); idx >= 0 {
+					p := opts.Prefix + rem[:idx+len(opts.Delimiter)]
+					if seenPrefixes[p] {
+						continue
+					}
+				}
+			}
 			result.IsTruncated = true
+			break
 		}
 	}
+
 	if result.IsTruncated && lastExamined != "" {
 		result.NextMarker = lastExamined
 		result.NextContinuationToken = base64.RawURLEncoding.EncodeToString([]byte(lastExamined))
 	}
 	return result, nil
-}
-
-func (f *FSBackend) migrateDirectObjects(ctx context.Context) error {
-	buckets, err := f.metaStore.ListBuckets(ctx)
-	if err != nil {
-		return err
-	}
-	for _, bucket := range buckets {
-		objects, err := f.metaStore.ListMetadata(ctx, bucket.Name, "")
-		if err != nil {
-			return err
-		}
-		for _, meta := range objects {
-			if meta.BlobID != "" {
-				continue
-			}
-			legacyPath := filepath.Join(f.basePath, bucket.Name, filepath.FromSlash(meta.Key))
-			file, err := os.Open(legacyPath)
-			if err != nil {
-				return fmt.Errorf("legacy object %s/%s is missing: %w", bucket.Name, meta.Key, err)
-			}
-			staged, stageErr := f.stageBlob(ctx, file, "", "", "")
-			_ = file.Close()
-			if stageErr != nil {
-				return stageErr
-			}
-			meta.BlobID = staged.id
-			meta.ContentLength = staged.size
-			meta.ETag = staged.etag
-			if err := f.metaStore.PutMetadata(ctx, bucket.Name, meta.Key, meta); err != nil {
-				_ = os.Remove(staged.path)
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 func (f *FSBackend) cleanupOrphanBlobs(ctx context.Context) error {
@@ -384,20 +412,28 @@ func (f *FSBackend) cleanupOrphanBlobs(ctx context.Context) error {
 	}
 	if err := filepath.WalkDir(f.blobPath, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if os.IsNotExist(walkErr) {
+				return nil
+			}
 			return walkErr
 		}
 		if entry.IsDir() {
 			return nil
 		}
 		if !referenced[entry.Name()] {
-			return os.Remove(path)
+			if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
+				return rmErr
+			}
 		}
 		return nil
-	}); err != nil {
+	}); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	entries, err := os.ReadDir(f.tmpPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 	for _, entry := range entries {

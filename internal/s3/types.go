@@ -32,6 +32,8 @@ type ListObjectsV2Result struct {
 	XMLName           xml.Name       `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListBucketResult"`
 	Name              string         `xml:"Name"`
 	Prefix            string         `xml:"Prefix"`
+	Delimiter         string         `xml:"Delimiter,omitempty"`
+	StartAfter        string         `xml:"StartAfter,omitempty"`
 	MaxKeys           int            `xml:"MaxKeys"`
 	IsTruncated       bool           `xml:"IsTruncated"`
 	Contents          []Object       `xml:"Contents"`
@@ -39,6 +41,7 @@ type ListObjectsV2Result struct {
 	ContinuationToken string         `xml:"ContinuationToken"`
 	NextToken         string         `xml:"NextContinuationToken"`
 	KeyCount          int            `xml:"KeyCount"`
+	EncodingType      string         `xml:"EncodingType,omitempty"`
 }
 
 // ListObjectsResult is the legacy marker-based listing response.
@@ -51,6 +54,7 @@ type ListObjectsResult struct {
 	Delimiter      string         `xml:"Delimiter,omitempty"`
 	MaxKeys        int            `xml:"MaxKeys"`
 	IsTruncated    bool           `xml:"IsTruncated"`
+	EncodingType   string         `xml:"EncodingType,omitempty"`
 	Contents       []Object       `xml:"Contents"`
 	CommonPrefixes []CommonPrefix `xml:"CommonPrefixes"`
 }
@@ -66,6 +70,7 @@ type Object struct {
 	ETag         string `xml:"ETag"`
 	Size         int64  `xml:"Size"`
 	StorageClass string `xml:"StorageClass"`
+	Owner        *Owner `xml:"Owner,omitempty"`
 }
 
 // CopyObjectResult is the response to CopyObject.
@@ -132,12 +137,16 @@ type CopyPartResult struct {
 }
 
 type ListPartsResult struct {
-	XMLName     xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListPartsResult"`
-	Bucket      string   `xml:"Bucket"`
-	Key         string   `xml:"Key"`
-	UploadID    string   `xml:"UploadId"`
-	Parts       []Part   `xml:"Part"`
-	IsTruncated bool     `xml:"IsTruncated"`
+	XMLName              xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListPartsResult"`
+	Bucket               string   `xml:"Bucket"`
+	Key                  string   `xml:"Key"`
+	UploadID             string   `xml:"UploadId"`
+	Parts                []Part   `xml:"Part"`
+	IsTruncated          bool     `xml:"IsTruncated"`
+	MaxParts             int      `xml:"MaxParts,omitempty"`
+	PartNumberMarker     int      `xml:"PartNumberMarker,omitempty"`
+	NextPartNumberMarker int      `xml:"NextPartNumberMarker,omitempty"`
+	EncodingType         string   `xml:"EncodingType,omitempty"`
 }
 
 type Part struct {
@@ -148,11 +157,19 @@ type Part struct {
 }
 
 type ListMultipartUploadsResult struct {
-	XMLName     xml.Name          `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListMultipartUploadsResult"`
-	Bucket      string            `xml:"Bucket"`
-	Prefix      string            `xml:"Prefix"`
-	Uploads     []MultipartUpload `xml:"Upload"`
-	IsTruncated bool              `xml:"IsTruncated"`
+	XMLName            xml.Name          `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListMultipartUploadsResult"`
+	Bucket             string            `xml:"Bucket"`
+	Prefix             string            `xml:"Prefix"`
+	Delimiter          string            `xml:"Delimiter,omitempty"`
+	KeyMarker          string            `xml:"KeyMarker,omitempty"`
+	UploadIDMarker     string            `xml:"UploadIdMarker,omitempty"`
+	NextKeyMarker      string            `xml:"NextKeyMarker,omitempty"`
+	NextUploadIDMarker string            `xml:"NextUploadIdMarker,omitempty"`
+	MaxUploads         int               `xml:"MaxUploads,omitempty"`
+	IsTruncated        bool              `xml:"IsTruncated"`
+	Uploads            []MultipartUpload `xml:"Upload"`
+	CommonPrefixes     []CommonPrefix    `xml:"CommonPrefixes"`
+	EncodingType       string            `xml:"EncodingType,omitempty"`
 }
 
 type MultipartUpload struct {

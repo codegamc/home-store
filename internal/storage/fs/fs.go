@@ -23,18 +23,6 @@ type FSBackend struct {
 	mu        sync.RWMutex
 }
 
-// bucketMetadata is the legacy on-disk bucket metadata format.
-type bucketMetadata struct {
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at"`
-	Region    string    `json:"region"`
-}
-
-// bucketPath returns the path to the bucket directory.
-func (f *FSBackend) bucketPath(name string) string {
-	return filepath.Join(f.basePath, name)
-}
-
 // NewBackend creates a new filesystem backend with the given base path.
 func NewBackend(basePath, dbPath, location string) (*FSBackend, error) {
 	if err := os.MkdirAll(basePath, 0700); err != nil {
@@ -54,7 +42,6 @@ func NewBackend(basePath, dbPath, location string) (*FSBackend, error) {
 
 	if _, err := os.Stat(dbPath); err != nil {
 		if os.IsNotExist(err) {
-			// The SQLite store below will initialize a new versioned database.
 		} else {
 			_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
 			_ = lockFile.Close()
@@ -69,27 +56,6 @@ func NewBackend(basePath, dbPath, location string) (*FSBackend, error) {
 		return nil, fmt.Errorf("failed to create metadata store: %w", err)
 	}
 
-	legacyComplete, err := metaStore.MigrationCompleted(context.Background(), "legacy-json-v1")
-	if err != nil {
-		_ = metaStore.Close()
-		_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
-		_ = lockFile.Close()
-		return nil, fmt.Errorf("failed to inspect legacy migration state: %w", err)
-	}
-	if !legacyComplete {
-		if err := migrateLegacyMetadata(context.Background(), basePath, metaStore); err != nil {
-			_ = metaStore.Close()
-			_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
-			_ = lockFile.Close()
-			return nil, fmt.Errorf("failed to migrate legacy metadata: %w", err)
-		}
-		if err := metaStore.MarkMigrationCompleted(context.Background(), "legacy-json-v1"); err != nil {
-			_ = metaStore.Close()
-			_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
-			_ = lockFile.Close()
-			return nil, fmt.Errorf("failed to complete legacy migration: %w", err)
-		}
-	}
 	blobPath := filepath.Join(basePath, ".home-store", "blobs")
 	tmpPath := filepath.Join(basePath, ".home-store", "tmp")
 	if err := os.MkdirAll(blobPath, 0700); err != nil {
@@ -112,10 +78,6 @@ func NewBackend(basePath, dbPath, location string) (*FSBackend, error) {
 		tmpPath:   tmpPath,
 		lockFile:  lockFile,
 	}
-	if err := backend.migrateDirectObjects(context.Background()); err != nil {
-		_ = backend.Close()
-		return nil, fmt.Errorf("failed to migrate direct object layout: %w", err)
-	}
 	if err := backend.cleanupOrphanBlobs(context.Background()); err != nil {
 		_ = backend.Close()
 		return nil, fmt.Errorf("failed to reconcile object blobs: %w", err)
@@ -127,7 +89,6 @@ func NewBackend(basePath, dbPath, location string) (*FSBackend, error) {
 func (f *FSBackend) CreateBucket(ctx context.Context, name, location string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	bucketPath := f.bucketPath(name)
 
 	exists, err := f.metaStore.BucketExists(ctx, name)
 	if err != nil {
@@ -135,11 +96,6 @@ func (f *FSBackend) CreateBucket(ctx context.Context, name, location string) err
 	}
 	if exists {
 		return storage.ErrBucketExists
-	}
-
-	// Create bucket directory
-	if err := os.MkdirAll(bucketPath, 0700); err != nil {
-		return fmt.Errorf("failed to create bucket directory: %w", err)
 	}
 
 	if location == "" {
@@ -176,11 +132,7 @@ func (f *FSBackend) DeleteBucket(ctx context.Context, name string) error {
 		return storage.ErrBucketNotEmpty
 	}
 
-	if err := f.metaStore.DeleteBucket(ctx, name); err != nil {
-		return err
-	}
-
-	return nil
+	return f.metaStore.DeleteBucket(ctx, name)
 }
 
 // ListBuckets returns all buckets.
