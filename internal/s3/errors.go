@@ -13,6 +13,8 @@ const (
 	InternalError         = "InternalError"
 	ServiceUnavailable    = "ServiceUnavailable"
 	SignatureDoesNotMatch = "SignatureDoesNotMatch"
+	RequestTimeTooSkewed  = "RequestTimeTooSkewed"
+	EntityTooLarge        = "EntityTooLarge"
 	NoSuchUpload          = "NoSuchUpload"
 	InvalidPart           = "InvalidPart"
 )

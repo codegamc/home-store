@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,22 +28,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	backend, err := fs.NewBackend(cfg.DataDir)
+	backend, err := fs.NewBackendWithOptions(cfg.DataDir, fs.Options{MaxObjectSize: cfg.MaxObjectSize, MaxStorageSize: cfg.MaxStorageSize, MultipartExpiry: cfg.MultipartExpiry})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error initializing storage backend: %v\n", err)
 		os.Exit(1)
 	}
+	defer func() { _ = backend.Close() }()
 
-	handler := api.NewHandler(backend)
-	srv := server.New(cfg.Addr, handler)
+	handler := api.NewHandler(backend, api.AuthConfig{AccessKey: cfg.AccessKey, SecretKey: cfg.SecretKey, Region: cfg.Region})
+	srv := server.New(cfg.Addr, handler, server.Options{
+		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		ReadTimeout:       cfg.ReadTimeout,
+		WriteTimeout:      cfg.WriteTimeout,
+		IdleTimeout:       cfg.IdleTimeout,
+	})
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
 	go func() {
 		slog.Info("starting server", "addr", cfg.Addr, "data_dir", cfg.DataDir)
-		if err := srv.Start(); err != nil {
-			slog.Error("server error", "err", err)
+		var startErr error
+		if cfg.TLSCertFile != "" {
+			startErr = srv.StartTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+		} else {
+			startErr = srv.Start()
+		}
+		if startErr != nil && startErr != http.ErrServerClosed {
+			slog.Error("server error", "err", startErr)
 			os.Exit(1)
 		}
 	}()

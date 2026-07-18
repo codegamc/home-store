@@ -2,8 +2,11 @@ package integration
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsV4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -55,7 +59,8 @@ func TestMain(m *testing.M) {
 	serverAddr = fmt.Sprintf("127.0.0.1:%d", port)
 
 	// Start the server
-	serverCmd = exec.Command(binPath, "-addr", serverAddr, "-data-dir", dataDir)
+	serverCmd = exec.Command(binPath, "-addr", serverAddr, "-data-dir", dataDir,
+		"-access-key", "test-access-key", "-secret-key", "test-secret-key", "-insecure-http")
 	serverCmd.Stdout = os.Stdout
 	serverCmd.Stderr = os.Stderr
 	if err := serverCmd.Start(); err != nil {
@@ -199,6 +204,14 @@ func createS3Client(ctx context.Context, addr string) (*s3.Client, error) {
 	})
 
 	return client, nil
+}
+
+func signRequest(ctx context.Context, request *http.Request) error {
+	payloadHash := sha256.Sum256(nil)
+	request.Header.Set("x-amz-content-sha256", hex.EncodeToString(payloadHash[:]))
+	return awsV4.NewSigner().SignHTTP(ctx, aws.Credentials{
+		AccessKeyID: "test-access-key", SecretAccessKey: "test-secret-key",
+	}, request, hex.EncodeToString(payloadHash[:]), "s3", "us-east-1", time.Now())
 }
 
 // generateBucketName generates a unique bucket name for testing.

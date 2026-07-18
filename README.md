@@ -1,6 +1,8 @@
 # Home Store
 
-Home Store is a filesystem-backed S3-compatible object-storage server for trusted home-lab networks. Its implemented APIs are exercised against the AWS SDK for Go v2 and Python boto3.
+Home Store is a single-node, filesystem-backed S3-compatible object-storage server for home-lab networks. Its implemented APIs are exercised against the AWS SDK for Go v2 and Python boto3.
+
+It is not a distributed or highly available storage system. Use independent backups; do not use it as the only copy of important data until the qualification gates in [docs/phase-5-qualification.md](docs/phase-5-qualification.md) have been completed.
 
 ## Goals
 
@@ -21,26 +23,36 @@ Build and run a local binary:
 
 ```bash
 make build
-./bin/home-store -data-dir /srv/home-store
+HOME_STORE_ACCESS_KEY=your-access-key \
+HOME_STORE_SECRET_KEY=your-secret-key \
+./bin/home-store -data-dir /srv/home-store \
+  -tls-cert /etc/home-store/tls.crt -tls-key /etc/home-store/tls.key
 ```
 
-The server listens on `0.0.0.0:9000` by default. Set `HOME_STORE_ADDR` or `HOME_STORE_DATA_DIR`, or pass `-addr` and `-data-dir`, to configure it.
+The server listens on `0.0.0.0:9000` by default. It requires an access key, secret key, and TLS certificate by default. Configure it with environment variables or flags; see [docs/security-and-storage.md](docs/security-and-storage.md). `-insecure-http` exists only for local development and tests.
 
 Build and run the container image:
 
 ```bash
 make docker
 sudo install -d -o 65532 -g 65532 /srv/home-store
-docker run --rm -p 9000:9000 -v /srv/home-store:/data home-store:dev
+docker run --rm -p 9000:9000 \
+  -v /srv/home-store:/data \
+  -v /srv/home-store-certs:/certs:ro \
+  -e HOME_STORE_ACCESS_KEY=your-access-key \
+  -e HOME_STORE_SECRET_KEY=your-secret-key \
+  -e HOME_STORE_TLS_CERT=/certs/tls.crt \
+  -e HOME_STORE_TLS_KEY=/certs/tls.key \
+  home-store:dev
 ```
 
 For Synology, use the same image in Container Manager and mount a persistent shared folder at `/data`. A native Synology package is not currently provided.
 
-> **Authentication TODO:** S3 signature verification and credential management are not implemented. The server currently accepts requests from any client that can reach it. Bind it only to a strictly trusted LAN and do not expose it to the internet.
+Home Store verifies AWS Signature Version 4 requests for one configured account. It does not yet provide multiple accounts, bucket policies, or ACLs. Do not share an access key between unrelated users. Keep the server behind a firewall and do not expose it directly to the internet.
 
 ## Backing Data
 
-Data is stored on the local filesystem under the configured data directory. The directory may be an NFS mount managed by the host, provided the server process has reliable read/write access.
+Data is stored on a local filesystem under the configured data directory. The server takes an exclusive advisory lock for this directory, so only one Home Store process may use it. NFS and other network filesystems are not supported: their locking and durability semantics vary too widely for the current storage guarantees.
 
 ## API Coverage
 

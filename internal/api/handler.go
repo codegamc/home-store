@@ -21,12 +21,17 @@ func generateRequestID() string {
 
 // Handler is the HTTP request handler for the S3 API.
 type Handler struct {
-	backend storage.Backend
+	backend  storage.Backend
+	auth     AuthConfig
+	skipAuth bool // only used by package-level handler tests
 }
 
 // NewHandler creates a new API handler.
-func NewHandler(backend storage.Backend) *Handler {
-	return &Handler{backend: backend}
+// An empty AuthConfig intentionally denies every request. The application
+// configuration requires credentials, so a server cannot accidentally start
+// as an unauthenticated object store.
+func NewHandler(backend storage.Backend, auth AuthConfig) *Handler {
+	return &Handler{backend: backend, auth: auth}
 }
 
 // parseBucketKey splits a request path into bucket and object key.
@@ -137,5 +142,11 @@ func (h *Handler) routeRequest(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Do not use http.ServeMux here: it normalizes paths containing dot
 	// segments, while S3 object keys are opaque and may legally contain them.
+	if !h.skipAuth {
+		if authErr := h.authorize(r); authErr != nil {
+			h.errorResponse(w, authErr.status, authErr.code, authErr.message)
+			return
+		}
+	}
 	h.routeRequest(w, r)
 }

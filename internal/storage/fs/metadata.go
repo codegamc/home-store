@@ -31,24 +31,51 @@ func (f *FSMetadataStore) metadataPath(bucket, key string) string {
 // PutMetadata stores metadata for an object.
 func (f *FSMetadataStore) PutMetadata(ctx context.Context, bucket, key string, meta storage.ObjectMeta) error {
 	metaPath := f.metadataPath(bucket, key)
-
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(metaPath), 0755); err != nil {
-		return fmt.Errorf("failed to create metadata directory: %w", err)
+	tmpPath, err := f.writeMetadataTemp(bucket, key, meta)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := os.Rename(tmpPath, metaPath); err != nil {
+		return fmt.Errorf("finalize metadata: %w", err)
+	}
+	return syncDirectory(filepath.Dir(metaPath))
+}
 
-	// Marshal metadata to JSON
+func (f *FSMetadataStore) writeMetadataTemp(bucket, key string, meta storage.ObjectMeta) (string, error) {
+	metaPath := f.metadataPath(bucket, key)
+	if err := os.MkdirAll(filepath.Dir(metaPath), 0700); err != nil {
+		return "", fmt.Errorf("failed to create metadata directory: %w", err)
+	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal metadata: %w", err)
+		return "", fmt.Errorf("failed to marshal metadata: %w", err)
 	}
-
-	// Write metadata file
-	if err := os.WriteFile(metaPath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write metadata file: %w", err)
+	tmp, err := os.CreateTemp(filepath.Dir(metaPath), ".metadata-*")
+	if err != nil {
+		return "", fmt.Errorf("create metadata temp file: %w", err)
 	}
-
-	return nil
+	tmpPath := tmp.Name()
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("set metadata permissions: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("write metadata: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("sync metadata: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("close metadata: %w", err)
+	}
+	return tmpPath, nil
 }
 
 // GetMetadata retrieves metadata for an object.

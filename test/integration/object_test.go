@@ -422,6 +422,7 @@ func TestRenameObject(t *testing.T) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://"+serverAddr+"/"+bucket+"/destination?renameObject", nil)
 	require.NoError(t, err)
 	request.Header.Set("x-amz-rename-source", "/"+bucket+"/source")
+	require.NoError(t, signRequest(ctx, request))
 	response, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
 	response.Body.Close()

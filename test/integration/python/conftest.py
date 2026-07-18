@@ -84,7 +84,18 @@ def server():
     addr = f"127.0.0.1:{port}"
 
     proc = subprocess.Popen(
-        [bin_path, "-addr", addr, "-data-dir", data_dir],
+        [
+            bin_path,
+            "-addr",
+            addr,
+            "-data-dir",
+            data_dir,
+            "-access-key",
+            "test-access-key",
+            "-secret-key",
+            "test-secret-key",
+            "-insecure-http",
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )

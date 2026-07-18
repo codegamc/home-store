@@ -140,6 +140,8 @@ func (h *Handler) multipartError(w http.ResponseWriter, err error) {
 		h.errorResponse(w, http.StatusNotFound, s3.NoSuchUpload, "the specified multipart upload does not exist")
 	case storage.ErrInvalidPart:
 		h.errorResponse(w, http.StatusBadRequest, s3.InvalidPart, "one or more specified parts could not be found")
+	case storage.ErrEntityTooLarge:
+		h.errorResponse(w, http.StatusRequestEntityTooLarge, s3.EntityTooLarge, "object exceeds the configured storage limit")
 	default:
 		h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "multipart upload operation failed")
 	}

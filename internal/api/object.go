@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,10 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	if err := h.backend.PutObject(r.Context(), bucket, key, r.Body, meta); err != nil {
 		if err == storage.ErrBucketNotFound {
 			h.errorResponseWithResource(w, http.StatusNotFound, s3.NoSuchBucket, "the specified bucket does not exist", fmt.Sprintf("/%s", bucket))
+		} else if errors.Is(err, errPayloadHashMismatch) {
+			h.errorResponse(w, http.StatusForbidden, s3.SignatureDoesNotMatch, "the signed payload hash does not match the request body")
+		} else if err == storage.ErrEntityTooLarge {
+			h.errorResponse(w, http.StatusRequestEntityTooLarge, s3.EntityTooLarge, "object exceeds the configured storage limit")
 		} else {
 			h.errorResponse(w, http.StatusInternalServerError, s3.InternalError, "failed to store object")
 		}

@@ -108,6 +108,7 @@ var (
 	ErrInvalidKey        = errors.New("invalid object key")
 	ErrUploadNotFound    = errors.New("multipart upload not found")
 	ErrInvalidPart       = errors.New("invalid multipart part")
+	ErrEntityTooLarge    = errors.New("object or storage limit exceeded")
 )
 
 // IsValidBucketName checks if a bucket name is valid according to S3 rules.

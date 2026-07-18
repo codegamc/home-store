@@ -51,7 +51,12 @@ func validPartNumber(partNumber int) bool {
 
 // CreateMultipartUpload starts a multipart upload for an existing bucket.
 func (f *FSBackend) CreateMultipartUpload(ctx context.Context, bucket, key string, meta storage.ObjectMeta) (storage.MultipartUpload, error) {
-	exists, err := f.BucketExists(ctx, bucket)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recoverIfNeeded(); err != nil {
+		return storage.MultipartUpload{}, err
+	}
+	exists, err := f.bucketExists(ctx, bucket)
 	if err != nil {
 		return storage.MultipartUpload{}, err
 	}
@@ -85,7 +90,7 @@ func (f *FSBackend) CreateMultipartUpload(ctx context.Context, bucket, key strin
 }
 
 func (f *FSBackend) readUpload(ctx context.Context, bucket, key, uploadID string) (multipartState, string, error) {
-	exists, err := f.BucketExists(ctx, bucket)
+	exists, err := f.bucketExists(ctx, bucket)
 	if err != nil {
 		return multipartState{}, "", err
 	}
@@ -107,11 +112,22 @@ func (f *FSBackend) readUpload(ctx context.Context, bucket, key, uploadID string
 	if state.UploadID != uploadID || state.Key != key {
 		return multipartState{}, "", storage.ErrUploadNotFound
 	}
+	if f.multipartExpiry > 0 && state.Initiated.Before(time.Now().Add(-f.multipartExpiry)) {
+		if err := os.RemoveAll(path); err != nil {
+			return multipartState{}, "", fmt.Errorf("expire multipart upload: %w", err)
+		}
+		return multipartState{}, "", storage.ErrUploadNotFound
+	}
 	return state, path, nil
 }
 
 // UploadPart stores or replaces one part of an in-progress upload.
 func (f *FSBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, body io.Reader) (storage.MultipartPart, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recoverIfNeeded(); err != nil {
+		return storage.MultipartPart{}, err
+	}
 	if !validPartNumber(partNumber) {
 		return storage.MultipartPart{}, storage.ErrInvalidPart
 	}
@@ -151,6 +167,11 @@ func (f *FSBackend) UploadPart(ctx context.Context, bucket, key, uploadID string
 
 // ListParts lists all uploaded parts in ascending part-number order.
 func (f *FSBackend) ListParts(ctx context.Context, bucket, key, uploadID string) ([]storage.MultipartPart, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recoverIfNeeded(); err != nil {
+		return nil, err
+	}
 	_, uploadPath, err := f.readUpload(ctx, bucket, key, uploadID)
 	if err != nil {
 		return nil, err
@@ -180,6 +201,11 @@ func (f *FSBackend) ListParts(ctx context.Context, bucket, key, uploadID string)
 
 // CompleteMultipartUpload concatenates selected parts into the final object.
 func (f *FSBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, completed []storage.CompletedPart) (storage.ObjectMeta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recoverIfNeeded(); err != nil {
+		return storage.ObjectMeta{}, err
+	}
 	state, uploadPath, err := f.readUpload(ctx, bucket, key, uploadID)
 	if err != nil {
 		return storage.ObjectMeta{}, err
@@ -239,12 +265,12 @@ func (f *FSBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, up
 		return storage.ObjectMeta{}, fmt.Errorf("open combined upload: %w", err)
 	}
 	meta := state.Meta
-	err = f.PutObject(ctx, bucket, key, data, meta)
+	err = f.putObject(ctx, bucket, key, data, meta)
 	_ = data.Close()
 	if err != nil {
 		return storage.ObjectMeta{}, err
 	}
-	meta, err = f.HeadObject(ctx, bucket, key)
+	meta, err = f.headObject(ctx, bucket, key)
 	if err != nil {
 		return storage.ObjectMeta{}, err
 	}
@@ -260,6 +286,11 @@ func (f *FSBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, up
 
 // AbortMultipartUpload removes an in-progress upload and all of its parts.
 func (f *FSBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recoverIfNeeded(); err != nil {
+		return err
+	}
 	_, uploadPath, err := f.readUpload(ctx, bucket, key, uploadID)
 	if err != nil {
 		return err
@@ -272,7 +303,15 @@ func (f *FSBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploa
 
 // ListMultipartUploads lists all in-progress uploads for a bucket.
 func (f *FSBackend) ListMultipartUploads(ctx context.Context, bucket string) ([]storage.MultipartUpload, error) {
-	exists, err := f.BucketExists(ctx, bucket)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.recoverIfNeeded(); err != nil {
+		return nil, err
+	}
+	if err := f.cleanupExpiredMultipart(ctx); err != nil {
+		return nil, err
+	}
+	exists, err := f.bucketExists(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
@@ -303,4 +342,44 @@ func (f *FSBackend) ListMultipartUploads(ctx context.Context, bucket string) ([]
 	}
 	sort.Slice(uploads, func(i, j int) bool { return uploads[i].Initiated.Before(uploads[j].Initiated) })
 	return uploads, nil
+}
+
+func (f *FSBackend) cleanupExpiredMultipart(ctx context.Context) error {
+	if f.multipartExpiry == 0 {
+		return nil
+	}
+	cutoff := time.Now().Add(-f.multipartExpiry)
+	buckets, err := f.listBuckets(ctx)
+	if err != nil {
+		return err
+	}
+	for _, bucket := range buckets {
+		entries, err := os.ReadDir(f.multipartPath(bucket.Name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read multipart uploads for cleanup: %w", err)
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			path := filepath.Join(f.multipartPath(bucket.Name), entry.Name())
+			data, err := os.ReadFile(filepath.Join(path, "upload.json"))
+			if err != nil {
+				return fmt.Errorf("read multipart state for cleanup: %w", err)
+			}
+			var state multipartState
+			if err := json.Unmarshal(data, &state); err != nil {
+				return fmt.Errorf("decode multipart state for cleanup: %w", err)
+			}
+			if state.Initiated.Before(cutoff) {
+				if err := os.RemoveAll(path); err != nil {
+					return fmt.Errorf("remove expired multipart upload: %w", err)
+				}
+			}
+		}
+	}
+	return nil
 }
